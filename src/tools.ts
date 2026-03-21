@@ -258,6 +258,36 @@ const GetReferences = Tool.make("get_references", {
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
+const RenameSymbol = Tool.make("rename_symbol", {
+  description:
+    "Rename a symbol across the entire project. " +
+    "By default returns a dry-run list of edits. Set apply: true to write changes to disk. " +
+    "Each edit shows file, position, oldText, and newText. " +
+    "Handles imports, re-exports, and type references.",
+  parameters: Schema.Struct({
+    ...PositionParams,
+    newName: Schema.String,
+    apply: Schema.optionalKey(Schema.Boolean),
+  }),
+  success: Schema.Struct({
+    canRename: Schema.Boolean,
+    reason: Schema.optionalKey(Schema.String),
+    edits: Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        line: Schema.Finite,
+        col: Schema.Finite,
+        oldText: Schema.String,
+        newText: Schema.String,
+      }),
+    ),
+    applied: Schema.Boolean,
+    position: PositionResult,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+})
+
 // -----------------------------------------------------------------------------
 // Toolkit
 // -----------------------------------------------------------------------------
@@ -271,6 +301,7 @@ export const IntrospectionToolkit = Toolkit.make(
   GetSignatureHelp,
   GetDefinition,
   GetReferences,
+  RenameSymbol,
 )
 
 // -----------------------------------------------------------------------------
@@ -533,6 +564,88 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
                 }
               }),
             ),
+            position: positionOf(ctx),
+            warning: ctx.warning,
+          }
+        }),
+
+      rename_symbol: ({ file, line, col, offset, newName, apply }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const renameInfo = ctx.service.getRenameInfo(file, ctx.offset, {})
+
+          if (!renameInfo.canRename) {
+            return {
+              canRename: false,
+              reason: renameInfo.localizedErrorMessage,
+              edits: [],
+              applied: false,
+              position: positionOf(ctx),
+              warning: ctx.warning,
+            }
+          }
+
+          const locations = ctx.service.findRenameLocations(
+            file, ctx.offset, false, false, { providePrefixAndSuffixTextForRename: true },
+          ) ?? []
+
+          const edits = locations.map((loc) => {
+            const sourceFile = ctx.service.getProgram()?.getSourceFile(loc.fileName)
+            const lc = sourceFile
+              ? offsetToLineCol(sourceFile, loc.textSpan.start)
+              : { line: 0, col: 0 }
+            const oldText = sourceFile
+              ? sourceFile.getFullText().slice(loc.textSpan.start, loc.textSpan.start + loc.textSpan.length)
+              : ""
+            return {
+              file: loc.fileName,
+              line: lc.line,
+              col: lc.col,
+              oldText,
+              newText: (loc.prefixText ?? "") + newName + (loc.suffixText ?? ""),
+            }
+          })
+
+          if (apply) {
+            // Group edits by file, apply in reverse offset order to preserve positions
+            const byFile = new Map<string, typeof edits>()
+            edits.forEach((e) => {
+              const existing = byFile.get(e.file) ?? []
+              existing.push(e)
+              byFile.set(e.file, existing)
+            })
+
+            yield* Effect.forEach(
+              [...byFile.entries()],
+              ([filePath, fileEdits]) =>
+                Effect.sync(() => {
+                  const sourceFile = ctx.service.getProgram()?.getSourceFile(filePath)
+                  if (!sourceFile) return
+                  let content = sourceFile.getFullText()
+
+                  // Find the corresponding locations sorted by offset descending
+                  const locsForFile = locations
+                    .filter((l) => l.fileName === filePath)
+                    .sort((a, b) => b.textSpan.start - a.textSpan.start)
+
+                  locsForFile.forEach((loc) => {
+                    const replacement = (loc.prefixText ?? "") + newName + (loc.suffixText ?? "")
+                    content =
+                      content.slice(0, loc.textSpan.start) +
+                      replacement +
+                      content.slice(loc.textSpan.start + loc.textSpan.length)
+                  })
+
+                  ts.sys.writeFile(filePath, content)
+                }),
+              { concurrency: 1 },
+            )
+          }
+
+          return {
+            canRename: true,
+            edits,
+            applied: apply ?? false,
             position: positionOf(ctx),
             warning: ctx.warning,
           }

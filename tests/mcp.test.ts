@@ -9,6 +9,7 @@ import { TsConfigResolver } from "../src/TsConfigResolver.ts"
 
 const fixtureFile = path.resolve(import.meta.dirname, "fixtures/sample.ts")
 const errorFile = path.resolve(import.meta.dirname, "fixtures/with-errors.ts")
+const importerFile = path.resolve(import.meta.dirname, "fixtures/importer.ts")
 
 const appLayer = McpServer.toolkit(IntrospectionToolkit).pipe(
   Layer.provide(IntrospectionHandlers),
@@ -534,6 +535,64 @@ describe("MCP integration (raw JSON-RPC)", () => {
 
       const content = result.structuredContent!
       expect(content["count"]).toBe(0)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- rename_symbol ---
+
+  it.live("rename_symbol dry run returns all rename locations", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // Rename `alice` at its declaration (line 11 col 14 in sample.ts)
+      const result = yield* callTool("rename_symbol", {
+        file: fixtureFile,
+        line: 11,
+        col: 14,
+        newName: "bob",
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content["canRename"]).toBe(true)
+
+      const edits = content["edits"] as Array<{
+        file: string
+        line: number
+        col: number
+        oldText: string
+        newText: string
+      }>
+      // alice is used in sample.ts (declaration + usage in getUser + usage in users array)
+      // and imported in importer.ts
+      expect(edits.length).toBeGreaterThanOrEqual(4)
+      edits.forEach((e) => {
+        expect(e.oldText).toBe("alice")
+        expect(e.newText).toBe("bob")
+      })
+
+      // Should span multiple files
+      const files = new Set(edits.map((e) => e.file))
+      expect(files.size).toBeGreaterThanOrEqual(2)
+
+      // Should NOT have applied changes (dry run)
+      expect(content["applied"]).toBe(false)
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("rename_symbol returns canRename false for non-renameable positions", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // Position on a keyword like `export` (line 1 col 1)
+      const result = yield* callTool("rename_symbol", {
+        file: fixtureFile,
+        line: 1,
+        col: 1,
+        newName: "foo",
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content["canRename"]).toBe(false)
     }).pipe(Effect.scoped),
   )
 })
