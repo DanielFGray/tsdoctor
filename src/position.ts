@@ -113,3 +113,22 @@ export const findNodeAtPosition = (
   }
   return ts.forEachChild(sourceFile, find)
 }
+
+/** Find the smallest AST node that fully contains the given range */
+export const findNodeForRange = (
+  sourceFile: ts.SourceFile,
+  startOffset: number,
+  endOffset: number,
+): ts.Node | undefined => {
+  let best: ts.Node | undefined
+  const find = (node: ts.Node): void => {
+    const nodeStart = node.getStart(sourceFile)
+    const nodeEnd = node.getEnd()
+    if (nodeStart <= startOffset && nodeEnd >= endOffset) {
+      best = node
+      ts.forEachChild(node, find)
+    }
+  }
+  ts.forEachChild(sourceFile, find)
+  return best
+}

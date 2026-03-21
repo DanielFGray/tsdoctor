@@ -5,7 +5,7 @@ import {
   NodeNotFoundError,
   ProgramCreateError,
 } from "./errors.ts"
-import { findNodeAtPosition, resolvePosition, type Position } from "./position.ts"
+import { findNodeAtPosition, findNodeForRange, resolvePosition, type Position } from "./position.ts"
 
 export interface FileContext {
   readonly checker: ts.TypeChecker
@@ -91,6 +91,41 @@ export const resolveFileContext = (
     }
 
     return { checker, sourceFile, program, position, node, warning } satisfies FileContext
+  })
+
+export interface RangeInput {
+  readonly startLine: number
+  readonly startCol: number
+  readonly endLine: number
+  readonly endCol: number
+}
+
+/**
+ * Preamble for range-based queries. Finds the smallest AST node that
+ * fully contains the given source range.
+ */
+export const resolveFileContextForRange = (
+  lsm: FileProvider,
+  file: string,
+  range: RangeInput,
+) =>
+  Effect.gen(function* () {
+    const { program, sourceFile, warning } = yield* resolveProgram(lsm, file)
+    const startPos = yield* resolvePosition(sourceFile, { line: range.startLine, col: range.startCol })
+    const endPos = yield* resolvePosition(sourceFile, { line: range.endLine, col: range.endCol })
+
+    const checker = program.getTypeChecker()
+    const node = findNodeForRange(sourceFile, startPos.offset, endPos.offset)
+
+    if (!node) {
+      return yield* new NodeNotFoundError({
+        file,
+        line: range.startLine,
+        col: range.startCol,
+      })
+    }
+
+    return { checker, sourceFile, program, position: startPos, node, warning } satisfies FileContext
   })
 
 /**

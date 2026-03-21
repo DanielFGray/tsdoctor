@@ -4,6 +4,7 @@ import { Tool, Toolkit } from "effect/unstable/ai"
 import { LanguageServiceManager } from "./LanguageServiceManager.ts"
 import {
   resolveFileContext,
+  resolveFileContextForRange,
   resolveFileOnly,
   resolveServiceContext,
 } from "./fileContext.ts"
@@ -70,10 +71,15 @@ const GetTypeAtPosition = Tool.make("get_type_at_position", {
     "Returns a machine-readable type tree and flat string. " +
     "Use this to understand what type a variable, parameter, or expression resolves to. " +
     "For human-readable hover info with docs, use get_quickinfo instead. " +
-    "depth controls type alias expansion (default 1 = overview, increase for nested detail).",
+    "depth controls type alias expansion (default 1 = overview, increase for nested detail). " +
+    "Use startLine/startCol + endLine/endCol to get the type of a range (e.g. a whole pipe chain).",
   parameters: Schema.Struct({
     ...PositionParams,
     depth: makeDepthParam(1),
+    startLine: Schema.optionalKey(Schema.Finite),
+    startCol: Schema.optionalKey(Schema.Finite),
+    endLine: Schema.optionalKey(Schema.Finite),
+    endCol: Schema.optionalKey(Schema.Finite),
   }),
   success: TypeResultSchema,
   ...toolDefaults,
@@ -351,11 +357,19 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
   Effect.gen(function* () {
     const lsm = yield* LanguageServiceManager
 
-    const typeAtPosition = ({ file, line, col, offset, depth }: {
-      readonly file: string; readonly line?: number; readonly col?: number; readonly offset?: number; readonly depth?: number
+    const typeAtPosition = ({ file, line, col, offset, depth, startLine, startCol, endLine, endCol }: {
+      readonly file: string
+      readonly line?: number; readonly col?: number; readonly offset?: number
+      readonly depth?: number
+      readonly startLine?: number; readonly startCol?: number
+      readonly endLine?: number; readonly endCol?: number
     }) =>
       Effect.gen(function* () {
-        const ctx = yield* resolveFileContext(lsm, file, { line, col, offset })
+        const hasRange = startLine !== undefined && startCol !== undefined
+          && endLine !== undefined && endCol !== undefined
+        const ctx = hasRange
+          ? yield* resolveFileContextForRange(lsm, file, { startLine, startCol, endLine, endCol })
+          : yield* resolveFileContext(lsm, file, { line, col, offset })
         const type = ctx.checker.getTypeAtLocation(ctx.node)
 
         return {

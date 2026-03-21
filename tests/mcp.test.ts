@@ -446,4 +446,60 @@ describe("MCP integration (raw JSON-RPC)", () => {
       })
     }).pipe(Effect.scoped),
   )
+
+  // --- expression range type query ---
+
+  it.live("get_type_at_position with range returns the enclosing expression type", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // The chain [alice].map(...).filter(...) spans lines 24-28
+      // Selecting lines 24-28 should get the type of the whole chain: string[]
+      const result = yield* callTool("get_type_at_position", {
+        file: fixtureFile,
+        startLine: 24,
+        startCol: 22,
+        endLine: 28,
+        endCol: 2,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content["flat"]).toContain("string")
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_type_at_position with range on a function call returns its return type", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // `getUser(1)` on line 30 — select the call expression
+      const result = yield* callTool("get_type_at_position", {
+        file: fixtureFile,
+        startLine: 30,
+        startCol: 22,
+        endLine: 30,
+        endCol: 32,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      // getUser returns User | null
+      expect(content["flat"]).toContain("User")
+      expect(content["flat"]).toContain("null")
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_type_at_position with point position still works (no range)", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // Regular point query should still work as before
+      const result = yield* callTool("get_type_at_position", {
+        file: fixtureFile,
+        line: 1,
+        col: 14,
+      })
+
+      expect(result.isError).not.toBe(true)
+      expect(result.structuredContent!["flat"]).toContain("hello")
+    }).pipe(Effect.scoped),
+  )
 })

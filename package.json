@@ -5,6 +5,7 @@
   "scripts": {
     "prepare": "effect-language-service patch",
     "typecheck": "tsc --noEmit",
+    "start": "bun src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

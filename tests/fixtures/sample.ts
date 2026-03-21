@@ -20,3 +20,11 @@ export const getUser = (id: number): User | null => {
 export type Pair<A, B> = readonly [A, B]
 
 export const pair: Pair<string, number> = ["hello", 42]
+
+export const users = [alice].map(
+  (u) => u.name
+).filter(
+  (name) => name.length > 0
+)
+
+export const result = getUser(1)
