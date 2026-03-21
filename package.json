@@ -1,0 +1,22 @@
+{
+  "name": "glass-cobra",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "prepare": "effect-language-service patch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "^4.0.0-beta.36",
+    "effect": "^4.0.0-beta.36"
+  },
+  "devDependencies": {
+    "@effect/language-service": "^0.81.0",
+    "@effect/vitest": "^4.0.0-beta.36",
+    "@types/bun": "latest",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
