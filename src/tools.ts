@@ -145,6 +145,7 @@ const GetDiagnostics = Tool.make("get_diagnostics", {
   parameters: Schema.Struct({
     file: Schema.String,
     projectWide: Schema.optionalKey(Schema.Boolean),
+    suggestions: Schema.optionalKey(Schema.Boolean),
     startLine: Schema.optionalKey(Schema.Finite),
     endLine: Schema.optionalKey(Schema.Finite),
   }),
@@ -367,6 +368,41 @@ const GetModuleExports = Tool.make("get_module_exports", {
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
+const GetFileOutline = Tool.make("get_file_outline", {
+  description:
+    "Get a structured symbol outline for a file. " +
+    "Returns a tree of all declarations (classes, functions, variables, interfaces) with line numbers. " +
+    "Faster than reading the whole file when you just need to know what's defined.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+  }),
+  success: Schema.Struct({
+    symbols: Schema.Unknown,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
+const GetFileReferences = Tool.make("get_file_references", {
+  description:
+    "Find all files that import or reference a given file. " +
+    "Useful before renaming, moving, or deleting a file to understand impact.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+  }),
+  success: Schema.Struct({
+    references: Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        line: Schema.Finite,
+        col: Schema.Finite,
+      }),
+    ),
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
 // -----------------------------------------------------------------------------
 // Toolkit
 // -----------------------------------------------------------------------------
@@ -384,6 +420,8 @@ export const IntrospectionToolkit = Toolkit.make(
   RenameSymbol,
   GetCodeFixes,
   GetModuleExports,
+  GetFileOutline,
+  GetFileReferences,
 )
 
 // -----------------------------------------------------------------------------
@@ -558,13 +596,20 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_diagnostics: ({ file, projectWide, startLine, endLine }) =>
+      get_diagnostics: ({ file, projectWide, suggestions, startLine, endLine }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveFileOnly(lsm, file)
           const program = ctx.service.getProgram()
-          const allDiagnostics = projectWide && program
-            ? ts.getPreEmitDiagnostics(program)
-            : ctx.service.getSemanticDiagnostics(file)
+          const semanticDiags = projectWide && program
+            ? [...ts.getPreEmitDiagnostics(program)]
+            : [...ctx.service.getSemanticDiagnostics(file)]
+
+          const includeSuggestions = suggestions !== false
+          const suggestionDiags = includeSuggestions
+            ? ctx.service.getSuggestionDiagnostics(file)
+            : []
+
+          const allDiagnostics = [...semanticDiags, ...suggestionDiags]
 
           const filtered = (startLine !== undefined || endLine !== undefined)
             ? allDiagnostics.filter((d) => {
@@ -895,6 +940,68 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           return {
             exports,
             resolvedFile,
+            warning: ctx.warning,
+          }
+        }),
+
+      get_file_outline: ({ file }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const tree = ctx.service.getNavigationTree(file)
+
+          const flattenTree = (node: ts.NavigationTree, depth = 0): Array<{
+            name: string
+            kind: string
+            line: number
+            col: number
+            depth: number
+            children?: Array<{ name: string; kind: string; line: number; col: number }>
+          }> => {
+            // Skip the top-level module node
+            if (node.kind === ts.ScriptElementKind.moduleElement && depth === 0) {
+              return (node.childItems ?? []).flatMap((child) => flattenTree(child, depth))
+            }
+
+            const sourceFile = ctx.service.getProgram()?.getSourceFile(file)
+            const span = node.spans[0]
+            const lc = sourceFile && span
+              ? offsetToLineCol(sourceFile, span.start)
+              : { line: 0, col: 0 }
+
+            const children = (node.childItems ?? []).map((child) => {
+              const childSpan = child.spans[0]
+              const childLc = sourceFile && childSpan
+                ? offsetToLineCol(sourceFile, childSpan.start)
+                : { line: 0, col: 0 }
+              return { name: child.text, kind: child.kind, line: childLc.line, col: childLc.col }
+            })
+
+            const entry = children.length > 0
+              ? { name: node.text, kind: node.kind, line: lc.line, col: lc.col, depth, children }
+              : { name: node.text, kind: node.kind, line: lc.line, col: lc.col, depth }
+
+            return [entry]
+          }
+
+          return {
+            symbols: flattenTree(tree) as unknown,
+            warning: ctx.warning,
+          }
+        }),
+
+      get_file_references: ({ file }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const refs = ctx.service.getFileReferences(file)
+
+          return {
+            references: refs.map((ref) => {
+              const sourceFile = ctx.service.getProgram()?.getSourceFile(ref.fileName)
+              const lc = sourceFile
+                ? offsetToLineCol(sourceFile, ref.textSpan.start)
+                : { line: 0, col: 0 }
+              return { file: ref.fileName, line: lc.line, col: lc.col }
+            }),
             warning: ctx.warning,
           }
         }),

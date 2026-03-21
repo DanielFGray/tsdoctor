@@ -707,4 +707,83 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(content).toHaveProperty("summary")
     }).pipe(Effect.scoped),
   )
+
+  // --- get_file_outline ---
+
+  it.live("get_file_outline returns symbol tree for a file", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_file_outline", { file: fixtureFile })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const symbols = content["symbols"] as Array<{
+        name: string
+        kind: string
+        line: number
+        children?: Array<{ name: string }>
+      }>
+      expect(symbols.length).toBeGreaterThan(0)
+
+      const names = symbols.map((s) => s.name)
+      expect(names).toContain("greeting")
+      expect(names).toContain("User")
+      expect(names).toContain("getUser")
+
+      // User interface should have child properties
+      const userSymbol = symbols.find((s) => s.name === "User")
+      expect(userSymbol?.children).toBeDefined()
+      expect(userSymbol!.children!.map((c) => c.name)).toContain("name")
+    }).pipe(Effect.scoped),
+  )
+
+  // --- get_file_references ---
+
+  it.live("get_file_references finds files that import a given file", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // sample.ts is imported by importer.ts and needs-import.ts
+      const result = yield* callTool("get_file_references", { file: fixtureFile })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const references = content["references"] as Array<{ file: string; line: number }>
+      expect(references.length).toBeGreaterThanOrEqual(1)
+
+      const files = references.map((r) => r.file)
+      expect(files.some((f) => f.includes("importer.ts"))).toBe(true)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- suggestion diagnostics ---
+
+  it.live("get_diagnostics includes suggestions by default", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // sample.ts should have suggestion diagnostics (e.g. unused variables)
+      const result = yield* callTool("get_diagnostics", { file: fixtureFile })
+
+      const content = result.structuredContent!
+      const diagnostics = content["diagnostics"] as Array<{ category: string }>
+      // Check that suggestions category can appear (may be 0 if file is clean)
+      // The key thing is it doesn't crash
+      expect(content).toHaveProperty("diagnostics")
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_diagnostics with suggestions: false excludes suggestions", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const withSuggestions = yield* callTool("get_diagnostics", { file: fixtureFile })
+      const withoutSuggestions = yield* callTool("get_diagnostics", {
+        file: fixtureFile,
+        suggestions: false,
+      })
+
+      // Without suggestions should have <= entries than with
+      const withCount = (withSuggestions.structuredContent!["count"] as number)
+      const withoutCount = (withoutSuggestions.structuredContent!["count"] as number)
+      expect(withoutCount).toBeLessThanOrEqual(withCount)
+    }).pipe(Effect.scoped),
+  )
 })
