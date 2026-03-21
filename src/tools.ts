@@ -49,37 +49,51 @@ const toolDefaults = {
 // Tool definitions
 // -----------------------------------------------------------------------------
 
+const TypeResultSchema = Schema.Struct({
+  flat: Schema.String,
+  tree: Schema.Unknown,
+  position: PositionResult,
+  warning: Schema.NullOr(Schema.String),
+})
+
+const makeDepthParam = (defaultDepth: number) =>
+  Schema.Finite.check(
+    Schema.isBetween({ minimum: 0, maximum: 10 }),
+  ).pipe(
+    Schema.optionalKey,
+    Schema.withDecodingDefaultKey(() => defaultDepth),
+  )
+
 const GetTypeAtPosition = Tool.make("get_type_at_position", {
   description:
-    "Get the resolved type of the expression at a given position in a TypeScript file. " +
-    "Returns both a flat string representation and a structured JSON type tree. " +
-    "Provide either line+col (1-based) or offset (0-based).",
+    "Resolve the TypeScript type of the expression at a position. " +
+    "Returns a machine-readable type tree and flat string. " +
+    "Use this to understand what type a variable, parameter, or expression resolves to. " +
+    "For human-readable hover info with docs, use get_quickinfo instead. " +
+    "depth controls type alias expansion (default 1 = overview, increase for nested detail).",
   parameters: Schema.Struct({
     ...PositionParams,
-    depth: Schema.Finite.check(
-      Schema.isBetween({ minimum: 0, maximum: 10 }),
-    ).pipe(
-      Schema.optionalKey,
-      Schema.withDecodingDefaultKey(() => 1),
-    ),
+    depth: makeDepthParam(1),
   }),
-  success: Schema.Struct({
-    flat: Schema.String,
-    tree: Schema.Unknown,
-    position: PositionResult,
-    warning: Schema.NullOr(Schema.String),
-  }),
+  success: TypeResultSchema,
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
 const GetQuickInfo = Tool.make("get_quickinfo", {
   description:
-    "Get hover-equivalent information at a position: type, documentation, JSDoc tags. " +
-    "Provide either line+col (1-based) or offset (0-based).",
+    "Get hover-equivalent info: display string, documentation, and JSDoc tags. " +
+    "Use this to see what an editor would show on hover — includes @param, @returns, @example tags. " +
+    "For machine-readable type structure, use get_type_at_position instead.",
   parameters: Schema.Struct(PositionParams),
   success: Schema.Struct({
     displayString: Schema.String,
     documentation: Schema.String,
+    tags: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        text: Schema.String,
+      }),
+    ),
     kind: Schema.String,
     position: PositionResult,
     warning: Schema.NullOr(Schema.String),
@@ -89,10 +103,18 @@ const GetQuickInfo = Tool.make("get_quickinfo", {
 
 const GetCompletions = Tool.make("get_completions", {
   description:
-    "Get available completions at a position in a TypeScript file. " +
-    "Returns member names, kinds, and sort text. " +
-    "Provide either line+col (1-based) or offset (0-based).",
-  parameters: Schema.Struct(PositionParams),
+    "Discover available members, properties, or in-scope symbols at a position. " +
+    "Use this to answer 'what methods does X have?' or 'what's available here?'. " +
+    "Use prefix to filter by name (e.g. prefix='get' for getter methods). " +
+    "Default limit 50; set higher if needed.",
+  parameters: Schema.Struct({
+    ...PositionParams,
+    prefix: Schema.optionalKey(Schema.String),
+    limit: Schema.Finite.pipe(
+      Schema.optionalKey,
+      Schema.withDecodingDefaultKey(() => 50),
+    ),
+  }),
   success: Schema.Struct({
     entries: Schema.Array(
       Schema.Struct({
@@ -111,10 +133,13 @@ const GetCompletions = Tool.make("get_completions", {
 
 const GetDiagnostics = Tool.make("get_diagnostics", {
   description:
-    "Get semantic diagnostics for a TypeScript file with full type expansions. " +
-    "Returns all type errors, their positions, and the full diagnostic message chain.",
+    "Get all type errors in a file with full (non-truncated) diagnostic messages and code snippets. " +
+    "Use startLine/endLine to scope to recently edited lines. " +
+    "This is a file-scoped tool — it checks the whole file (or a range), unlike position-based tools.",
   parameters: Schema.Struct({
     file: Schema.String,
+    startLine: Schema.optionalKey(Schema.Finite),
+    endLine: Schema.optionalKey(Schema.Finite),
   }),
   success: Schema.Struct({
     diagnostics: Schema.Array(
@@ -122,6 +147,7 @@ const GetDiagnostics = Tool.make("get_diagnostics", {
         message: Schema.String,
         category: Schema.String,
         code: Schema.Finite,
+        snippet: Schema.optionalKey(Schema.String),
         position: Schema.optionalKey(PositionResult),
         relatedInformation: Schema.optionalKey(
           Schema.Array(
@@ -133,7 +159,7 @@ const GetDiagnostics = Tool.make("get_diagnostics", {
         ),
       }),
     ),
-    count: Schema.Number,
+    count: Schema.Finite,
     warning: Schema.NullOr(Schema.String),
   }),
   ...toolDefaults,
@@ -141,21 +167,83 @@ const GetDiagnostics = Tool.make("get_diagnostics", {
 
 const ExpandType = Tool.make("expand_type", {
   description:
-    "Recursively expand a type at a position to the specified depth. " +
-    "Returns a structured JSON type tree. Use higher depth to see nested type details. " +
-    "Provide either line+col (1-based) or offset (0-based).",
+    "Deep-expand a type at a position (default depth 3). " +
+    "Use when get_type_at_position returned a reference you need to drill into, " +
+    "or to understand complex generics, union types, and nested structures.",
   parameters: Schema.Struct({
     ...PositionParams,
-    depth: Schema.Finite.check(
-      Schema.isBetween({ minimum: 0, maximum: 10 }),
-    ).pipe(
-      Schema.optionalKey,
-      Schema.withDecodingDefaultKey(() => 3),
-    ),
+    depth: makeDepthParam(3),
   }),
+  success: TypeResultSchema,
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
+const GetSignatureHelp = Tool.make("get_signature_help", {
+  description:
+    "Get parameter info for a function call at a position. " +
+    "Cursor must be inside call parentheses. " +
+    "Returns expected parameters with types, which parameter is active, and overload signatures. " +
+    "Use this to answer 'what arguments does this function expect?'.",
+  parameters: Schema.Struct(PositionParams),
   success: Schema.Struct({
-    flat: Schema.String,
-    tree: Schema.Unknown,
+    signatures: Schema.Array(
+      Schema.Struct({
+        label: Schema.String,
+        parameters: Schema.Array(
+          Schema.Struct({
+            name: Schema.String,
+            type: Schema.String,
+            isOptional: Schema.Boolean,
+          }),
+        ),
+        documentation: Schema.String,
+      }),
+    ),
+    activeSignature: Schema.Finite,
+    activeParameter: Schema.Finite,
+    position: PositionResult,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
+const GetDefinition = Tool.make("get_definition", {
+  description:
+    "Go to the definition of a symbol. " +
+    "Resolves through re-exports, barrel files, and generic instantiations. " +
+    "Returns the file, line, and col where the symbol is defined.",
+  parameters: Schema.Struct(PositionParams),
+  success: Schema.Struct({
+    definitions: Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        line: Schema.Finite,
+        col: Schema.Finite,
+        name: Schema.String,
+        kind: Schema.String,
+      }),
+    ),
+    position: PositionResult,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
+const GetReferences = Tool.make("get_references", {
+  description:
+    "Find all semantic references to a symbol (more precise than grep). " +
+    "Returns every file and position where the symbol is used, plus whether each is a definition. " +
+    "Use to understand impact of a change or find all callers.",
+  parameters: Schema.Struct(PositionParams),
+  success: Schema.Struct({
+    references: Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        line: Schema.Finite,
+        col: Schema.Finite,
+        isDefinition: Schema.Boolean,
+      }),
+    ),
     position: PositionResult,
     warning: Schema.NullOr(Schema.String),
   }),
@@ -172,6 +260,9 @@ export const IntrospectionToolkit = Toolkit.make(
   GetCompletions,
   GetDiagnostics,
   ExpandType,
+  GetSignatureHelp,
+  GetDefinition,
+  GetReferences,
 )
 
 // -----------------------------------------------------------------------------
@@ -194,6 +285,64 @@ const categoryName = (category: ts.DiagnosticCategory): string => {
   }
 }
 
+const positionOf = (ctx: { position: { lineCol: { line: number; col: number }; offset: number } }) => ({
+  line: ctx.position.lineCol.line,
+  col: ctx.position.lineCol.col,
+  offset: ctx.position.offset,
+})
+
+const getSnippet = (file: ts.SourceFile, start: number, contextLines = 1): string => {
+  const lc = offsetToLineCol(file, start)
+  const lineStarts = file.getLineStarts()
+  const startLine = Math.max(0, lc.line - 1 - contextLines)
+  const endLine = Math.min(lineStarts.length - 1, lc.line - 1 + contextLines)
+  const text = file.getFullText()
+
+  const lines: string[] = []
+  for (let i = startLine; i <= endLine; i++) {
+    const lineStart = lineStarts[i]!
+    const lineEnd = i + 1 < lineStarts.length ? lineStarts[i + 1]! : text.length
+    const lineText = text.slice(lineStart, lineEnd).replace(/\n$/, "")
+    const marker = i === lc.line - 1 ? ">" : " "
+    lines.push(`${marker} ${i + 1} | ${lineText}`)
+  }
+  return lines.join("\n")
+}
+
+const formatDiagnostic = (d: ts.Diagnostic) => {
+  const position = d.file && d.start !== undefined
+    ? (() => {
+      const lc = offsetToLineCol(d.file, d.start)
+      return { line: lc.line, col: lc.col, offset: d.start }
+    })()
+    : undefined
+
+  const snippet = d.file && d.start !== undefined
+    ? getSnippet(d.file, d.start)
+    : undefined
+
+  const relatedInformation = d.relatedInformation?.map((ri) => {
+    if (ri.file && ri.start !== undefined) {
+      const lc = offsetToLineCol(ri.file, ri.start)
+      return { message: flattenDiagnosticMessageText(ri.messageText), position: { line: lc.line, col: lc.col, offset: ri.start } }
+    }
+    return { message: flattenDiagnosticMessageText(ri.messageText) }
+  })
+
+  const base = {
+    message: flattenDiagnosticMessageText(d.messageText),
+    category: categoryName(d.category),
+    code: d.code,
+  }
+
+  // Build result, omitting undefined optional fields (exactOptionalPropertyTypes)
+  const withSnippet = snippet ? { ...base, snippet } : base
+  if (position && relatedInformation) return { ...withSnippet, position, relatedInformation }
+  if (position) return { ...withSnippet, position }
+  if (relatedInformation) return { ...withSnippet, relatedInformation }
+  return withSnippet
+}
+
 // -----------------------------------------------------------------------------
 // Handler layer
 // -----------------------------------------------------------------------------
@@ -202,23 +351,23 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
   Effect.gen(function* () {
     const lsm = yield* LanguageServiceManager
 
-    return {
-      get_type_at_position: ({ file, line, col, offset, depth }) =>
-        Effect.gen(function* () {
-          const ctx = yield* resolveFileContext(lsm, file, { line, col, offset })
-          const type = ctx.checker.getTypeAtLocation(ctx.node)
+    const typeAtPosition = ({ file, line, col, offset, depth }: {
+      readonly file: string; readonly line?: number; readonly col?: number; readonly offset?: number; readonly depth?: number
+    }) =>
+      Effect.gen(function* () {
+        const ctx = yield* resolveFileContext(lsm, file, { line, col, offset })
+        const type = ctx.checker.getTypeAtLocation(ctx.node)
 
-          return {
-            flat: typeToString(ctx.checker, type, ctx.node),
-            tree: typeToTree(ctx.checker, type, depth) as unknown,
-            position: {
-              line: ctx.position.lineCol.line,
-              col: ctx.position.lineCol.col,
-              offset: ctx.position.offset,
-            },
-            warning: ctx.warning,
-          }
-        }),
+        return {
+          flat: typeToString(ctx.checker, type, ctx.node),
+          tree: typeToTree(ctx.checker, type, depth) as unknown,
+          position: positionOf(ctx),
+          warning: ctx.warning,
+        }
+      })
+
+    return {
+      get_type_at_position: typeAtPosition,
 
       get_quickinfo: ({ file, line, col, offset }) =>
         Effect.gen(function* () {
@@ -228,95 +377,137 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           return {
             displayString: info?.displayParts?.map((p) => p.text).join("") ?? "",
             documentation: info?.documentation?.map((p) => p.text).join("") ?? "",
+            tags: (info?.tags ?? []).map((t) => ({
+              name: t.name,
+              text: t.text?.map((p) => p.text).join("") ?? "",
+            })),
             kind: info?.kind ?? "unknown",
-            position: {
-              line: ctx.position.lineCol.line,
-              col: ctx.position.lineCol.col,
-              offset: ctx.position.offset,
-            },
+            position: positionOf(ctx),
             warning: ctx.warning,
           }
         }),
 
-      get_completions: ({ file, line, col, offset }) =>
+      get_completions: ({ file, line, col, offset, prefix, limit }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
           const completions = ctx.service.getCompletionsAtPosition(file, ctx.offset, undefined)
 
+          const allEntries = (completions?.entries ?? [])
+          const filtered = prefix
+            ? allEntries.filter((e) => e.name.toLowerCase().startsWith(prefix.toLowerCase()))
+            : allEntries
+
           return {
-            entries: (completions?.entries ?? []).map((e) => ({
+            entries: filtered.slice(0, limit).map((e) => ({
               name: e.name,
               kind: e.kind,
               sortText: e.sortText,
             })),
             isGlobalCompletion: completions?.isGlobalCompletion ?? false,
             isMemberCompletion: completions?.isMemberCompletion ?? false,
-            position: {
-              line: ctx.position.lineCol.line,
-              col: ctx.position.lineCol.col,
-              offset: ctx.position.offset,
-            },
+            position: positionOf(ctx),
             warning: ctx.warning,
           }
         }),
 
-      get_diagnostics: ({ file }) =>
+      get_diagnostics: ({ file, startLine, endLine }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveFileOnly(lsm, file)
-          const diagnostics = ctx.service.getSemanticDiagnostics(file)
+          const allDiagnostics = ctx.service.getSemanticDiagnostics(file)
+
+          const filtered = (startLine !== undefined || endLine !== undefined)
+            ? allDiagnostics.filter((d) => {
+              if (!d.file || d.start === undefined) return false
+              const lc = offsetToLineCol(d.file, d.start)
+              if (startLine !== undefined && lc.line < startLine) return false
+              if (endLine !== undefined && lc.line > endLine) return false
+              return true
+            })
+            : allDiagnostics
 
           return {
-            diagnostics: diagnostics.map((d) => {
-              const position = d.file && d.start !== undefined
-                ? (() => {
-                  const lc = offsetToLineCol(d.file, d.start)
-                  return { line: lc.line, col: lc.col, offset: d.start }
-                })()
-                : undefined
-
-              const relatedInformation = d.relatedInformation?.map((ri) => {
-                if (ri.file && ri.start !== undefined) {
-                  const lc = offsetToLineCol(ri.file, ri.start)
-                  return { message: flattenDiagnosticMessageText(ri.messageText), position: { line: lc.line, col: lc.col, offset: ri.start } }
-                }
-                return { message: flattenDiagnosticMessageText(ri.messageText) }
-              })
-
-              const base = {
-                message: flattenDiagnosticMessageText(d.messageText),
-                category: categoryName(d.category),
-                code: d.code,
-              }
-
-              if (position && relatedInformation) {
-                return { ...base, position, relatedInformation }
-              }
-              if (position) {
-                return { ...base, position }
-              }
-              if (relatedInformation) {
-                return { ...base, relatedInformation }
-              }
-              return base
-            }),
-            count: diagnostics.length,
+            diagnostics: filtered.map(formatDiagnostic),
+            count: filtered.length,
             warning: ctx.warning,
           }
         }),
 
-      expand_type: ({ file, line, col, offset, depth }) =>
+      expand_type: typeAtPosition,
+
+      get_signature_help: ({ file, line, col, offset }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveFileContext(lsm, file, { line, col, offset })
-          const type = ctx.checker.getTypeAtLocation(ctx.node)
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const help = ctx.service.getSignatureHelpItems(file, ctx.offset, undefined)
 
           return {
-            flat: typeToString(ctx.checker, type, ctx.node),
-            tree: typeToTree(ctx.checker, type, depth) as unknown,
-            position: {
-              line: ctx.position.lineCol.line,
-              col: ctx.position.lineCol.col,
-              offset: ctx.position.offset,
-            },
+            signatures: (help?.items ?? []).map((item) => ({
+              label: [
+                ...item.prefixDisplayParts,
+                ...item.parameters.flatMap((p, i) => [
+                  ...(i > 0 ? item.separatorDisplayParts : []),
+                  ...p.displayParts,
+                ]),
+                ...item.suffixDisplayParts,
+              ].map((p) => p.text).join(""),
+              parameters: item.parameters.map((p) => ({
+                name: p.name,
+                type: p.displayParts.map((dp) => dp.text).join(""),
+                isOptional: p.isOptional,
+              })),
+              documentation: item.documentation.map((d) => d.text).join(""),
+            })),
+            activeSignature: help?.selectedItemIndex ?? 0,
+            activeParameter: help?.argumentIndex ?? 0,
+            position: positionOf(ctx),
+            warning: ctx.warning,
+          }
+        }),
+
+      get_definition: ({ file, line, col, offset }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const defs = ctx.service.getDefinitionAtPosition(file, ctx.offset)
+
+          return {
+            definitions: (defs ?? []).map((d) => {
+              const sourceFile = ctx.service.getProgram()?.getSourceFile(d.fileName)
+              const lc = sourceFile
+                ? offsetToLineCol(sourceFile, d.textSpan.start)
+                : { line: 0, col: 0 }
+              return {
+                file: d.fileName,
+                line: lc.line,
+                col: lc.col,
+                name: d.name ?? "",
+                kind: d.kind,
+              }
+            }),
+            position: positionOf(ctx),
+            warning: ctx.warning,
+          }
+        }),
+
+      get_references: ({ file, line, col, offset }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const refs = ctx.service.findReferences(file, ctx.offset)
+
+          return {
+            references: (refs ?? []).flatMap((symbol) =>
+              symbol.references.map((ref) => {
+                const sourceFile = ctx.service.getProgram()?.getSourceFile(ref.fileName)
+                const lc = sourceFile
+                  ? offsetToLineCol(sourceFile, ref.textSpan.start)
+                  : { line: 0, col: 0 }
+                return {
+                  file: ref.fileName,
+                  line: lc.line,
+                  col: lc.col,
+                  isDefinition: ref.isDefinition ?? false,
+                }
+              }),
+            ),
+            position: positionOf(ctx),
             warning: ctx.warning,
           }
         }),

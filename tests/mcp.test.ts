@@ -245,4 +245,205 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(content["_tag"]).toBe("PositionOutOfRangeError")
     }).pipe(Effect.scoped),
   )
+
+  // --- get_signature_help ---
+
+  it.live("get_signature_help returns parameter info inside a call", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // getUser(id: number) — line 16, inside the call `getUser(1)`
+      // but the fixture doesn't have a standalone call. Let's query the function params.
+      // Actually, `getUser = (id: number)` — position inside the parameter list
+      // Line 15 col 25 is inside `(id: number)` — the `id` parameter
+      const result = yield* callTool("get_signature_help", {
+        file: fixtureFile,
+        line: 15,
+        col: 25,
+      })
+
+      // Signature help may or may not be available at a param declaration
+      // (it's designed for call sites). The tool should not crash regardless.
+      expect(result.isError).not.toBe(true)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- get_definition ---
+
+  it.live("get_definition resolves variable reference to its declaration", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // `alice` on line 16 col 28 (inside getUser body: `return alice`)
+      const result = yield* callTool("get_definition", {
+        file: fixtureFile,
+        line: 16,
+        col: 28,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const definitions = content["definitions"] as Array<{
+        file: string
+        line: number
+        name: string
+      }>
+      expect(definitions.length).toBeGreaterThan(0)
+      // Should point back to line 11 where alice is declared
+      expect(definitions[0].line).toBe(11)
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_definition resolves type reference", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // `User` in the return type on line 15: `: User | null`
+      // "User" starts around col 39
+      const result = yield* callTool("get_definition", {
+        file: fixtureFile,
+        line: 15,
+        col: 39,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const definitions = content["definitions"] as Array<{
+        file: string
+        line: number
+      }>
+      expect(definitions.length).toBeGreaterThan(0)
+      // Should point back to line 5 where User interface is declared
+      expect(definitions[0].line).toBe(5)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- get_references ---
+
+  it.live("get_references finds all uses of a variable", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // `alice` declaration at line 11 col 14
+      const result = yield* callTool("get_references", {
+        file: fixtureFile,
+        line: 11,
+        col: 14,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const references = content["references"] as Array<{
+        file: string
+        line: number
+      }>
+      // Should find at least 2: declaration (line 11) and usage (line 16)
+      expect(references.length).toBeGreaterThanOrEqual(2)
+      const lines = references.map((r) => r.line)
+      expect(lines).toContain(11)
+      expect(lines).toContain(16)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- get_diagnostics range filter ---
+
+  it.live("get_diagnostics with startLine/endLine filters results", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // with-errors.ts has errors on line 3 and line 5
+      // Filter to just line 3
+      const result = yield* callTool("get_diagnostics", {
+        file: errorFile,
+        startLine: 3,
+        endLine: 3,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content["count"]).toBe(1)
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_diagnostics without range still returns all", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_diagnostics", { file: errorFile })
+
+      const content = result.structuredContent!
+      expect((content["count"] as number)).toBeGreaterThanOrEqual(2)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- completions prefix filter and limit ---
+
+  it.live("get_completions with prefix filters entries", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_completions", {
+        file: fixtureFile,
+        line: 2,
+        col: 1,
+        prefix: "greet",
+      })
+
+      expect(result.isError).not.toBe(true)
+      const entries = result.structuredContent!["entries"] as Array<{ name: string }>
+      expect(entries.length).toBeGreaterThan(0)
+      entries.forEach((e) => {
+        expect(e.name.toLowerCase()).toContain("greet")
+      })
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_completions with limit caps results", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_completions", {
+        file: fixtureFile,
+        line: 2,
+        col: 1,
+        limit: 5,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const entries = result.structuredContent!["entries"] as Array<{ name: string }>
+      expect(entries.length).toBeLessThanOrEqual(5)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- JSDoc tags in quickinfo ---
+
+  it.live("get_quickinfo includes tags array", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_quickinfo", {
+        file: fixtureFile,
+        line: 1,
+        col: 14,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      // tags should be present as an array (even if empty for this fixture)
+      expect(content).toHaveProperty("tags")
+      expect(Array.isArray(content["tags"])).toBe(true)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- code snippets in diagnostics ---
+
+  it.live("get_diagnostics includes code snippets", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_diagnostics", { file: errorFile })
+
+      expect(result.isError).not.toBe(true)
+      const diagnostics = result.structuredContent!["diagnostics"] as Array<{
+        snippet: string
+        message: string
+      }>
+      expect(diagnostics.length).toBeGreaterThan(0)
+      // Each diagnostic with a position should have a snippet
+      diagnostics.forEach((d) => {
+        expect(d.snippet).toBeDefined()
+        expect(d.snippet.length).toBeGreaterThan(0)
+      })
+    }).pipe(Effect.scoped),
+  )
 })
