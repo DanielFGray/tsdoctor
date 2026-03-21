@@ -10,6 +10,7 @@ import { TsConfigResolver } from "../src/TsConfigResolver.ts"
 const fixtureFile = path.resolve(import.meta.dirname, "fixtures/sample.ts")
 const errorFile = path.resolve(import.meta.dirname, "fixtures/with-errors.ts")
 const importerFile = path.resolve(import.meta.dirname, "fixtures/importer.ts")
+const needsImportFile = path.resolve(import.meta.dirname, "fixtures/needs-import.ts")
 
 const appLayer = McpServer.toolkit(IntrospectionToolkit).pipe(
   Layer.provide(IntrospectionHandlers),
@@ -593,6 +594,66 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(result.isError).not.toBe(true)
       const content = result.structuredContent!
       expect(content["canRename"]).toBe(false)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- get_code_fixes ---
+
+  it.live("get_code_fixes returns suggested fixes for an error", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // needs-import.ts has `alice` used without import (line 7)
+      // First get the diagnostic to find the error code
+      const diagResult = yield* callTool("get_diagnostics", { file: needsImportFile })
+      const diagnostics = diagResult.structuredContent!["diagnostics"] as Array<{
+        code: number
+        position?: { line: number; col: number; offset: number }
+      }>
+      expect(diagnostics.length).toBeGreaterThan(0)
+
+      const errorDiag = diagnostics.find((d) => d.position?.line === 7)!
+      expect(errorDiag).toBeDefined()
+
+      const result = yield* callTool("get_code_fixes", {
+        file: needsImportFile,
+        line: errorDiag.position!.line,
+        col: errorDiag.position!.col,
+        errorCodes: [errorDiag.code],
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const fixes = content["fixes"] as Array<{
+        description: string
+        changes: Array<{ file: string; edits: Array<{ newText: string }> }>
+      }>
+      expect(fixes.length).toBeGreaterThan(0)
+      // Should suggest adding an import for `alice`
+      const importFix = fixes.find((f) =>
+        f.description.toLowerCase().includes("import"),
+      )
+      expect(importFix).toBeDefined()
+    }).pipe(Effect.scoped),
+  )
+
+  // --- get_module_exports ---
+
+  it.live("get_module_exports lists exports from a relative module", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_module_exports", {
+        file: importerFile,
+        moduleSpecifier: "./sample.ts",
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const exports = content["exports"] as Array<{ name: string; kind: string }>
+      const names = exports.map((e) => e.name)
+      expect(names).toContain("greeting")
+      expect(names).toContain("alice")
+      expect(names).toContain("User")
+      expect(names).toContain("getUser")
     }).pipe(Effect.scoped),
   )
 })

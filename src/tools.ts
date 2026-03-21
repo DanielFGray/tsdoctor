@@ -288,6 +288,67 @@ const RenameSymbol = Tool.make("rename_symbol", {
   ...toolDefaults,
 })
 
+const GetCodeFixes = Tool.make("get_code_fixes", {
+  description:
+    "Get suggested code fixes for a diagnostic at a position. " +
+    "Pass the error code(s) from get_diagnostics. Returns fix descriptions and text edits. " +
+    "Covers auto-import, add missing property, convert types, etc. " +
+    "Set apply: true to write the first fix to disk.",
+  parameters: Schema.Struct({
+    ...PositionParams,
+    errorCodes: Schema.Array(Schema.Finite),
+    apply: Schema.optionalKey(Schema.Boolean),
+  }),
+  success: Schema.Struct({
+    fixes: Schema.Array(
+      Schema.Struct({
+        fixName: Schema.String,
+        description: Schema.String,
+        changes: Schema.Array(
+          Schema.Struct({
+            file: Schema.String,
+            isNewFile: Schema.Boolean,
+            edits: Schema.Array(
+              Schema.Struct({
+                offset: Schema.Finite,
+                length: Schema.Finite,
+                newText: Schema.String,
+              }),
+            ),
+          }),
+        ),
+      }),
+    ),
+    applied: Schema.Boolean,
+    position: PositionResult,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+})
+
+const GetModuleExports = Tool.make("get_module_exports", {
+  description:
+    "List all exports from a module. Pass a file (context for resolution) and a module specifier " +
+    "(e.g. 'effect', './foo'). Returns export names, kinds, and type strings. " +
+    "Use to answer 'what's available from this module?'.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+    moduleSpecifier: Schema.String,
+  }),
+  success: Schema.Struct({
+    exports: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        kind: Schema.String,
+        type: Schema.String,
+      }),
+    ),
+    resolvedFile: Schema.optionalKey(Schema.String),
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
 // -----------------------------------------------------------------------------
 // Toolkit
 // -----------------------------------------------------------------------------
@@ -302,6 +363,8 @@ export const IntrospectionToolkit = Toolkit.make(
   GetDefinition,
   GetReferences,
   RenameSymbol,
+  GetCodeFixes,
+  GetModuleExports,
 )
 
 // -----------------------------------------------------------------------------
@@ -647,6 +710,134 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
             edits,
             applied: apply ?? false,
             position: positionOf(ctx),
+            warning: ctx.warning,
+          }
+        }),
+
+      get_code_fixes: ({ file, line, col, offset, errorCodes, apply }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const program = ctx.service.getProgram()
+
+          // Use the offset as both start and end for point diagnostics
+          const codeFixes = ctx.service.getCodeFixesAtPosition(
+            file, ctx.offset, ctx.offset + 1, errorCodes, {}, {},
+          )
+
+          const fixes = codeFixes.map((fix) => ({
+            fixName: fix.fixName,
+            description: fix.description,
+            changes: fix.changes.map((change) => ({
+              file: change.fileName,
+              isNewFile: change.isNewFile ?? false,
+              edits: change.textChanges.map((tc) => ({
+                offset: tc.span.start,
+                length: tc.span.length,
+                newText: tc.newText,
+              })),
+            })),
+          }))
+
+          if (apply && fixes.length > 0) {
+            const firstFix = fixes[0]!
+            yield* Effect.forEach(
+              firstFix.changes,
+              (change) =>
+                Effect.sync(() => {
+                  if (change.isNewFile) {
+                    ts.sys.writeFile(change.file, change.edits.map((e) => e.newText).join(""))
+                    return
+                  }
+                  const sf = program?.getSourceFile(change.file)
+                  if (!sf) return
+                  let content = sf.getFullText()
+
+                  // Apply edits in reverse order to preserve offsets
+                  const sorted = [...change.edits].sort((a, b) => b.offset - a.offset)
+                  sorted.forEach((edit) => {
+                    content =
+                      content.slice(0, edit.offset) +
+                      edit.newText +
+                      content.slice(edit.offset + edit.length)
+                  })
+
+                  ts.sys.writeFile(change.file, content)
+                }),
+              { concurrency: 1 },
+            )
+          }
+
+          return {
+            fixes,
+            applied: (apply && fixes.length > 0) ?? false,
+            position: positionOf(ctx),
+            warning: ctx.warning,
+          }
+        }),
+
+      get_module_exports: ({ file, moduleSpecifier }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const program = ctx.service.getProgram()
+
+          if (!program) {
+            return yield* new ProgramCreateError({ file })
+          }
+
+          const checker = program.getTypeChecker()
+          const sourceFile = program.getSourceFile(file)
+
+          if (!sourceFile) {
+            return yield* new FileNotInProgramError({ file })
+          }
+
+          const resolved = ts.resolveModuleName(
+            moduleSpecifier,
+            file,
+            program.getCompilerOptions(),
+            ts.sys,
+          )
+
+          const resolvedFile = resolved.resolvedModule?.resolvedFileName
+          if (!resolvedFile) {
+            return {
+              exports: [],
+              warning: `Could not resolve module '${moduleSpecifier}' from ${file}`,
+            }
+          }
+
+          const resolvedSourceFile = program.getSourceFile(resolvedFile)
+          if (!resolvedSourceFile) {
+            return {
+              exports: [],
+              resolvedFile,
+              warning: `Module resolved to ${resolvedFile} but source file not in program`,
+            }
+          }
+
+          const moduleSymbol = checker.getSymbolAtLocation(resolvedSourceFile)
+          if (!moduleSymbol) {
+            return {
+              exports: [],
+              resolvedFile,
+              warning: `No symbol found for module ${resolvedFile}`,
+            }
+          }
+
+          const exportSymbols = checker.getExportsOfModule(moduleSymbol)
+          const exports = exportSymbols.map((sym) => {
+            const type = checker.getTypeOfSymbol(sym)
+            const kind = ts.SymbolFlags[sym.flags & ~ts.SymbolFlags.Transient] ?? "unknown"
+            return {
+              name: sym.getName(),
+              kind,
+              type: checker.typeToString(type, undefined, ts.TypeFormatFlags.NoTruncation),
+            }
+          })
+
+          return {
+            exports,
+            resolvedFile,
             warning: ctx.warning,
           }
         }),
