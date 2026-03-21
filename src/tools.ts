@@ -139,17 +139,19 @@ const GetCompletions = Tool.make("get_completions", {
 
 const GetDiagnostics = Tool.make("get_diagnostics", {
   description:
-    "Get all type errors in a file with full (non-truncated) diagnostic messages and code snippets. " +
-    "Use startLine/endLine to scope to recently edited lines. " +
-    "This is a file-scoped tool — it checks the whole file (or a range), unlike position-based tools.",
+    "Get type errors with full (non-truncated) diagnostic messages and code snippets. " +
+    "By default checks a single file. Set projectWide: true to check all files in the project. " +
+    "Use startLine/endLine to scope to recently edited lines.",
   parameters: Schema.Struct({
     file: Schema.String,
+    projectWide: Schema.optionalKey(Schema.Boolean),
     startLine: Schema.optionalKey(Schema.Finite),
     endLine: Schema.optionalKey(Schema.Finite),
   }),
   success: Schema.Struct({
     diagnostics: Schema.Array(
       Schema.Struct({
+        file: Schema.optionalKey(Schema.String),
         message: Schema.String,
         category: Schema.String,
         code: Schema.Finite,
@@ -335,11 +337,18 @@ const formatDiagnostic = (d: ts.Diagnostic) => {
     return { message: flattenDiagnosticMessageText(ri.messageText) }
   })
 
-  const base = {
-    message: flattenDiagnosticMessageText(d.messageText),
-    category: categoryName(d.category),
-    code: d.code,
-  }
+  const base = d.file
+    ? {
+      file: d.file.fileName,
+      message: flattenDiagnosticMessageText(d.messageText),
+      category: categoryName(d.category),
+      code: d.code,
+    }
+    : {
+      message: flattenDiagnosticMessageText(d.messageText),
+      category: categoryName(d.category),
+      code: d.code,
+    }
 
   // Build result, omitting undefined optional fields (exactOptionalPropertyTypes)
   const withSnippet = snippet ? { ...base, snippet } : base
@@ -424,10 +433,13 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_diagnostics: ({ file, startLine, endLine }) =>
+      get_diagnostics: ({ file, projectWide, startLine, endLine }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveFileOnly(lsm, file)
-          const allDiagnostics = ctx.service.getSemanticDiagnostics(file)
+          const program = ctx.service.getProgram()
+          const allDiagnostics = projectWide && program
+            ? ts.getPreEmitDiagnostics(program)
+            : ctx.service.getSemanticDiagnostics(file)
 
           const filtered = (startLine !== undefined || endLine !== undefined)
             ? allDiagnostics.filter((d) => {

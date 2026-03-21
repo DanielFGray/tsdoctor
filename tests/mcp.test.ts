@@ -502,4 +502,38 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(result.structuredContent!["flat"]).toContain("hello")
     }).pipe(Effect.scoped),
   )
+
+  // --- project-wide diagnostics ---
+
+  it.live("get_diagnostics with projectWide returns errors across all files", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // Use any file in the project as the anchor, set projectWide: true
+      // Should find the 2 errors from with-errors.ts even though we pass sample.ts
+      const result = yield* callTool("get_diagnostics", {
+        file: fixtureFile,
+        projectWide: true,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect((content["count"] as number)).toBeGreaterThanOrEqual(2)
+      // Errors should reference the actual file with errors
+      const diagnostics = content["diagnostics"] as Array<{ position?: { file?: string } }>
+      const hasErrorFileRef = diagnostics.some((d) =>
+        d.position !== undefined,
+      )
+      expect(hasErrorFileRef).toBe(true)
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_diagnostics without projectWide still scopes to single file", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      const result = yield* callTool("get_diagnostics", { file: fixtureFile })
+
+      const content = result.structuredContent!
+      expect(content["count"]).toBe(0)
+    }).pipe(Effect.scoped),
+  )
 })
