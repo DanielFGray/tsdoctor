@@ -22,6 +22,12 @@ TypeScript compiler introspection server — MCP tools for humans and AI agents.
 - `src/` — all source code
 - `SPEC.md` — project specification and design decisions
 
+## Running the MCP Server
+
+Start: `PORT=39100 bun run src/main.ts`
+
+Do NOT use `bun --hot` — hot reloading invalidates MCP sessions, causing "Mcp-Session-Id does not exist" crashes. This is an upstream issue in Effect's McpServer (it calls `Effect.die` on stale sessions instead of returning a structured error). Restart the server cleanly instead.
+
 <!-- effect-solutions:start -->
 ## Effect Best Practices
 

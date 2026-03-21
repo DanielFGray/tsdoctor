@@ -168,6 +168,24 @@ const GetDiagnostics = Tool.make("get_diagnostics", {
       }),
     ),
     count: Schema.Finite,
+    summary: Schema.String,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
+const Typecheck = Tool.make("typecheck", {
+  description:
+    "Quick project-wide type check. Returns pass/fail, error count, and tsc-style summary. " +
+    "The fastest way to answer 'does this project typecheck?'. " +
+    "Pass any file in the project to identify which tsconfig to use.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+  }),
+  success: Schema.Struct({
+    pass: Schema.Boolean,
+    errorCount: Schema.Finite,
+    summary: Schema.String,
     warning: Schema.NullOr(Schema.String),
   }),
   ...toolDefaults,
@@ -358,6 +376,7 @@ export const IntrospectionToolkit = Toolkit.make(
   GetQuickInfo,
   GetCompletions,
   GetDiagnostics,
+  Typecheck,
   ExpandType,
   GetSignatureHelp,
   GetDefinition,
@@ -385,6 +404,18 @@ const categoryName = (category: ts.DiagnosticCategory): string => {
     case ts.DiagnosticCategory.Suggestion: return "suggestion"
     case ts.DiagnosticCategory.Message: return "message"
   }
+}
+
+/** Format a diagnostic as a tsc-style one-liner: file(line,col): category TScode: message */
+const formatDiagnosticLine = (d: ts.Diagnostic): string => {
+  const message = flattenDiagnosticMessageText(d.messageText)
+  const category = categoryName(d.category)
+  if (d.file && d.start !== undefined) {
+    const lc = offsetToLineCol(d.file, d.start)
+    const fileName = d.file.fileName.replace(process.cwd() + "/", "")
+    return `${fileName}(${lc.line},${lc.col}): ${category} TS${d.code}: ${message}`
+  }
+  return `${category} TS${d.code}: ${message}`
 }
 
 const positionOf = (ctx: { position: { lineCol: { line: number; col: number }; offset: number } }) => ({
@@ -545,9 +576,35 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
             })
             : allDiagnostics
 
+          const summary = filtered.map(formatDiagnosticLine).join("\n")
+
           return {
             diagnostics: filtered.map(formatDiagnostic),
             count: filtered.length,
+            summary: filtered.length > 0
+              ? summary + `\n\nFound ${filtered.length} error(s).`
+              : "No errors found.",
+            warning: ctx.warning,
+          }
+        }),
+
+      typecheck: ({ file }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const program = ctx.service.getProgram()
+          const diagnostics = program
+            ? ts.getPreEmitDiagnostics(program)
+            : ctx.service.getSemanticDiagnostics(file)
+
+          const errors = diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error)
+          const summary = errors.length > 0
+            ? errors.map(formatDiagnosticLine).join("\n") + `\n\nFound ${errors.length} error(s).`
+            : "No errors found."
+
+          return {
+            pass: errors.length === 0,
+            errorCount: errors.length,
+            summary,
             warning: ctx.warning,
           }
         }),
