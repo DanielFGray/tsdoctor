@@ -114,6 +114,44 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
     }
   }
 
+  /**
+   * Re-expand the tsconfig include globs and update the file list.
+   * Picks up new files (e.g. freshly generated .d.ts in dist/) automatically.
+   */
+  refreshFileList(): void {
+    if (!this.config) return
+    const configFile = ts.readConfigFile(this.config.configPath, ts.sys.readFile)
+    const configDir = ts.sys.resolvePath(this.config.configPath + "/..")
+    const parsed = ts.parseJsonConfigFileContent(
+      configFile.config,
+      ts.sys,
+      configDir,
+      undefined,
+      this.config.configPath,
+    )
+
+    const newSet = new Set(parsed.fileNames)
+    const oldSet = new Set(this.fileNames)
+
+    // Add new files
+    parsed.fileNames.forEach((f) => {
+      if (!oldSet.has(f)) {
+        this.fileNames.push(f)
+      }
+    })
+
+    // Remove deleted files
+    for (let i = this.fileNames.length - 1; i >= 0; i--) {
+      if (!newSet.has(this.fileNames[i]!)) {
+        this.fileNames.splice(i, 1)
+      }
+    }
+
+    if (newSet.size !== oldSet.size || [...newSet].some((f) => !oldSet.has(f))) {
+      this.projectVersion++
+    }
+  }
+
   private computeVersion(fileName: string): string {
     const mtime = ts.sys.getModifiedTime?.(fileName)
     return mtime !== undefined ? String(mtime.getTime()) : "0"

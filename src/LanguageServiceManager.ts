@@ -81,6 +81,7 @@ export class LanguageServiceManager extends ServiceMap.Service<
 
           if (Option.isSome(existing)) {
             const managed = existing.value
+            managed.host.refreshFileList()
             managed.host.ensureFile(absPath)
             managed.host.refreshVersions()
             managed.lastAccessedAt = Date.now()
