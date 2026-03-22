@@ -869,4 +869,25 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(allActions.length).toBeGreaterThan(0)
     }).pipe(Effect.scoped),
   )
+
+  // --- invalidate ---
+
+  it.live("invalidate clears cache and subsequent queries still work", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+
+      // Query a file first to warm the cache
+      yield* callTool("typecheck", { file: fixtureFile })
+
+      // Invalidate
+      const result = yield* callTool("invalidate", {})
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content["message"]).toContain("invalidated")
+
+      // Subsequent query should still work (lazy rebuild)
+      const result2 = yield* callTool("typecheck", { file: fixtureFile })
+      expect(result2.isError).not.toBe(true)
+    }).pipe(Effect.scoped),
+  )
 })

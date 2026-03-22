@@ -403,6 +403,17 @@ const GetFileReferences = Tool.make("get_file_references", {
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
+const Invalidate = Tool.make("invalidate", {
+  description:
+    "Drop all cached TypeScript language services and rebuild from scratch on next query. " +
+    "Use after external builds (tsc, bundler), npm install, or when types seem stale. " +
+    "This is cheap — the next tool call will recreate the service lazily.",
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({
+    message: Schema.String,
+  }),
+})
+
 const OrganizeImports = Tool.make("organize_imports", {
   description:
     "Clean up imports: sort, remove unused, combine. " +
@@ -529,6 +540,7 @@ export const IntrospectionToolkit = Toolkit.make(
   GetModuleExports,
   GetFileOutline,
   GetFileReferences,
+  Invalidate,
   OrganizeImports,
   FixAll,
   Refactor,
@@ -780,8 +792,14 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
             : ctx.service.getSemanticDiagnostics(file)
 
           const errors = diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error)
+          const maxLines = 30
+          const lines = errors.map(formatDiagnosticLine)
+          const truncated = lines.length > maxLines
+          const shown = truncated ? lines.slice(0, maxLines) : lines
           const summary = errors.length > 0
-            ? errors.map(formatDiagnosticLine).join("\n") + `\n\nFound ${errors.length} error(s).`
+            ? shown.join("\n")
+              + (truncated ? `\n... and ${lines.length - maxLines} more` : "")
+              + `\n\nFound ${errors.length} error(s).`
             : "No errors found."
 
           return {
@@ -1142,6 +1160,12 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
             }),
             warning: ctx.warning,
           }
+        }),
+
+      invalidate: () =>
+        Effect.gen(function* () {
+          yield* lsm.invalidate()
+          return { message: "All language services invalidated. Next query will rebuild from scratch." }
         }),
 
       organize_imports: ({ file, apply }) =>

@@ -43,6 +43,7 @@ export class LanguageServiceManager extends ServiceMap.Service<
       readonly warning: string | null
     }>
     readonly evictIdle: (timeoutMs: number) => Effect.Effect<number>
+    readonly invalidate: () => Effect.Effect<void>
     readonly disposeAll: () => Effect.Effect<void>
   }
 >()("LanguageServiceManager") {
@@ -126,6 +127,15 @@ export class LanguageServiceManager extends ServiceMap.Service<
           return evicted.length
         })
 
+      /** Drop all cached services and clear tsconfig cache. Next query rebuilds from scratch. */
+      const invalidate = () =>
+        Effect.gen(function* () {
+          const state = yield* Ref.get(cache)
+          HashMap.forEach(state, (managed) => managed.service.dispose())
+          yield* Ref.set(cache, HashMap.empty())
+          yield* resolver.invalidate()
+        })
+
       const disposeAll = () =>
         Effect.gen(function* () {
           const state = yield* Ref.get(cache)
@@ -133,7 +143,7 @@ export class LanguageServiceManager extends ServiceMap.Service<
           yield* Ref.set(cache, HashMap.empty())
         })
 
-      return { getForFile, evictIdle, disposeAll }
+      return { getForFile, evictIdle, invalidate, disposeAll }
     }),
   )
 }
