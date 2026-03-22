@@ -406,6 +406,38 @@ const GetFileReferences = Tool.make("get_file_references", {
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
+const GetCallHierarchy = Tool.make("get_call_hierarchy", {
+  description:
+    "Find incoming callers or outgoing callees of a function/method. " +
+    "Set direction to 'incoming' (who calls this?) or 'outgoing' (what does this call?). " +
+    "More useful than get_references for understanding control flow.",
+  parameters: Schema.Struct({
+    ...PositionParams,
+    direction: Schema.Union([Schema.Literal("incoming"), Schema.Literal("outgoing")]),
+  }),
+  success: Schema.Struct({
+    item: Schema.optionalKey(Schema.Struct({
+      name: Schema.String,
+      kind: Schema.String,
+      file: Schema.String,
+      line: Schema.Finite,
+      col: Schema.Finite,
+    })),
+    calls: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        kind: Schema.String,
+        file: Schema.String,
+        line: Schema.Finite,
+        col: Schema.Finite,
+      }),
+    ),
+    position: PositionResult,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
 const Invalidate = Tool.make("invalidate", {
   description:
     "Drop all cached TypeScript language services and rebuild from scratch on next query. " +
@@ -543,6 +575,7 @@ export const IntrospectionToolkit = Toolkit.make(
   GetModuleExports,
   GetFileOutline,
   GetFileReferences,
+  GetCallHierarchy,
   Invalidate,
   OrganizeImports,
   FixAll,
@@ -1161,6 +1194,58 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
                 : { line: 0, col: 0 }
               return { file: ref.fileName, line: lc.line, col: lc.col }
             }),
+            warning: ctx.warning,
+          }
+        }),
+
+      get_call_hierarchy: ({ file, line, col, offset, direction }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const prepared = ctx.service.prepareCallHierarchy(file, ctx.offset)
+
+          if (!prepared) {
+            return {
+              calls: [],
+              position: positionOf(ctx),
+              warning: "No call hierarchy item at this position",
+            }
+          }
+
+          const item = Array.isArray(prepared) ? prepared[0]! : prepared
+          const sourceFile = ctx.service.getProgram()?.getSourceFile(item.file)
+          const itemLc = sourceFile
+            ? offsetToLineCol(sourceFile, item.selectionSpan.start)
+            : { line: 0, col: 0 }
+
+          const rawCalls = direction === "incoming"
+            ? ctx.service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start)
+            : ctx.service.provideCallHierarchyOutgoingCalls(item.file, item.selectionSpan.start)
+
+          const calls = rawCalls.map((call) => {
+            const target = "from" in call ? call.from : call.to
+            const sf = ctx.service.getProgram()?.getSourceFile(target.file)
+            const lc = sf
+              ? offsetToLineCol(sf, target.selectionSpan.start)
+              : { line: 0, col: 0 }
+            return {
+              name: target.name,
+              kind: target.kind,
+              file: target.file,
+              line: lc.line,
+              col: lc.col,
+            }
+          })
+
+          return {
+            item: {
+              name: item.name,
+              kind: item.kind,
+              file: item.file,
+              line: itemLc.line,
+              col: itemLc.col,
+            },
+            calls,
+            position: positionOf(ctx),
             warning: ctx.warning,
           }
         }),

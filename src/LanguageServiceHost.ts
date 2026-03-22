@@ -87,13 +87,13 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
   }
 
   /**
-   * Refresh versions for tracked files by re-checking mtime.
-   * Returns true if any file changed.
+   * Refresh versions for ALL files the compiler has seen, not just project files.
+   * This catches changes in node_modules .d.ts files (e.g. linked dependencies
+   * that rebuild their dist/). Returns true if any file changed.
    */
   refreshVersions(): boolean {
     let changed = false
-    this.fileNames.forEach((fileName) => {
-      const oldVersion = this.versions.get(fileName)
+    this.versions.forEach((oldVersion, fileName) => {
       const newVersion = this.computeVersion(fileName)
       if (oldVersion !== newVersion) {
         this.versions.set(fileName, newVersion)

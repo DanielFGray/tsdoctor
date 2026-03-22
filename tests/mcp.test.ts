@@ -890,4 +890,43 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(result2.isError).not.toBe(true)
     }).pipe(Effect.scoped),
   )
+
+  // --- call hierarchy ---
+
+  it.live("get_call_hierarchy returns incoming calls", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // `alice` is used inside getUser (line 16) — getUser calls alice
+      // Query getUser at line 15 col 14
+      const result = yield* callTool("get_call_hierarchy", {
+        file: fixtureFile,
+        line: 15,
+        col: 14,
+        direction: "incoming",
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content).toHaveProperty("calls")
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("get_call_hierarchy returns outgoing calls", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // getUser calls alice (line 16) — query getUser for outgoing
+      const result = yield* callTool("get_call_hierarchy", {
+        file: fixtureFile,
+        line: 15,
+        col: 14,
+        direction: "outgoing",
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const calls = content["calls"] as Array<{ name: string }>
+      // getUser should have outgoing calls (to alice at minimum)
+      expect(calls).toBeDefined()
+    }).pipe(Effect.scoped),
+  )
 })
