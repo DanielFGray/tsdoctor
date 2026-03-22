@@ -786,4 +786,87 @@ describe("MCP integration (raw JSON-RPC)", () => {
       expect(withoutCount).toBeLessThanOrEqual(withCount)
     }).pipe(Effect.scoped),
   )
+
+  // --- organize_imports ---
+
+  it.live("organize_imports returns edits in dry-run mode", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // needs-import.ts has messy imports — organize should produce edits
+      const result = yield* callTool("organize_imports", { file: needsImportFile })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content).toHaveProperty("changes")
+      expect(content["applied"]).toBe(false)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- fix_all ---
+
+  it.live("fix_all applies a fix across entire file", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // First get a fixId from get_code_fixes
+      const diagResult = yield* callTool("get_diagnostics", { file: needsImportFile })
+      const diagnostics = diagResult.structuredContent!["diagnostics"] as Array<{
+        code: number
+        position?: { line: number; col: number }
+      }>
+      const errorDiag = diagnostics.find((d) => d.position)
+      if (!errorDiag?.position) return // skip if no positioned errors
+
+      const fixResult = yield* callTool("get_code_fixes", {
+        file: needsImportFile,
+        line: errorDiag.position.line,
+        col: errorDiag.position.col,
+        errorCodes: [errorDiag.code],
+      })
+
+      const fixes = fixResult.structuredContent!["fixes"] as Array<{
+        fixName: string
+        fixId?: string
+      }>
+      const fixWithId = fixes.find((f) => f.fixId)
+      if (!fixWithId) return // skip if no combined fix available
+
+      const result = yield* callTool("fix_all", {
+        file: needsImportFile,
+        fixId: fixWithId.fixId,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content).toHaveProperty("changes")
+      expect(content["applied"]).toBe(false)
+    }).pipe(Effect.scoped),
+  )
+
+  // --- refactor ---
+
+  it.live("refactor lists applicable refactors at a position", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // getUser function (lines 15-18) — select the whole function for extract refactors
+      const result = yield* callTool("refactor", {
+        file: fixtureFile,
+        startLine: 15,
+        startCol: 1,
+        endLine: 18,
+        endCol: 2,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      const refactors = content["refactors"] as Array<{
+        name: string
+        description: string
+        actions: Array<{ name: string; description: string }>
+      }>
+      expect(refactors.length).toBeGreaterThan(0)
+      // Should include some kind of extract action
+      const allActions = refactors.flatMap((r) => r.actions)
+      expect(allActions.length).toBeGreaterThan(0)
+    }).pipe(Effect.scoped),
+  )
 })

@@ -403,6 +403,113 @@ const GetFileReferences = Tool.make("get_file_references", {
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
+const OrganizeImports = Tool.make("organize_imports", {
+  description:
+    "Clean up imports: sort, remove unused, combine. " +
+    "Returns edits by default (dry run). Set apply: true to write changes.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+    apply: Schema.optionalKey(Schema.Boolean),
+  }),
+  success: Schema.Struct({
+    changes: Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        edits: Schema.Array(
+          Schema.Struct({
+            offset: Schema.Finite,
+            length: Schema.Finite,
+            newText: Schema.String,
+          }),
+        ),
+      }),
+    ),
+    applied: Schema.Boolean,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+})
+
+const FixAll = Tool.make("fix_all", {
+  description:
+    "Apply a code fix across an entire file (e.g. add all missing imports at once). " +
+    "Pass a fixId from get_code_fixes results. Returns edits by default (dry run). " +
+    "Set apply: true to write changes.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+    fixId: Schema.String,
+    apply: Schema.optionalKey(Schema.Boolean),
+  }),
+  success: Schema.Struct({
+    changes: Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        isNewFile: Schema.Boolean,
+        edits: Schema.Array(
+          Schema.Struct({
+            offset: Schema.Finite,
+            length: Schema.Finite,
+            newText: Schema.String,
+          }),
+        ),
+      }),
+    ),
+    applied: Schema.Boolean,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+})
+
+const Refactor = Tool.make("refactor", {
+  description:
+    "List or apply refactors at a position or range. " +
+    "Without actionName: lists available refactors (extract function, extract constant, move to file, etc.). " +
+    "With refactorName + actionName: returns the edits for that refactor. " +
+    "Set apply: true to write changes. Use startLine/startCol + endLine/endCol for range-based refactors.",
+  parameters: Schema.Struct({
+    file: Schema.String,
+    line: Schema.optionalKey(Schema.Finite),
+    col: Schema.optionalKey(Schema.Finite),
+    offset: Schema.optionalKey(Schema.Finite),
+    startLine: Schema.optionalKey(Schema.Finite),
+    startCol: Schema.optionalKey(Schema.Finite),
+    endLine: Schema.optionalKey(Schema.Finite),
+    endCol: Schema.optionalKey(Schema.Finite),
+    refactorName: Schema.optionalKey(Schema.String),
+    actionName: Schema.optionalKey(Schema.String),
+    apply: Schema.optionalKey(Schema.Boolean),
+  }),
+  success: Schema.Struct({
+    refactors: Schema.optionalKey(Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        description: Schema.String,
+        actions: Schema.Array(
+          Schema.Struct({
+            name: Schema.String,
+            description: Schema.String,
+          }),
+        ),
+      }),
+    )),
+    changes: Schema.optionalKey(Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        edits: Schema.Array(
+          Schema.Struct({
+            offset: Schema.Finite,
+            length: Schema.Finite,
+            newText: Schema.String,
+          }),
+        ),
+      }),
+    )),
+    applied: Schema.Boolean,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+})
+
 // -----------------------------------------------------------------------------
 // Toolkit
 // -----------------------------------------------------------------------------
@@ -422,6 +529,9 @@ export const IntrospectionToolkit = Toolkit.make(
   GetModuleExports,
   GetFileOutline,
   GetFileReferences,
+  OrganizeImports,
+  FixAll,
+  Refactor,
 )
 
 // -----------------------------------------------------------------------------
@@ -455,6 +565,34 @@ const formatDiagnosticLine = (d: ts.Diagnostic): string => {
   }
   return `${category} TS${d.code}: ${message}`
 }
+
+/** Apply FileTextChanges to disk — shared by organize_imports, fix_all, refactor */
+const applyFileChanges = (
+  service: ts.LanguageService,
+  fileChanges: readonly ts.FileTextChanges[],
+) =>
+  Effect.forEach(
+    fileChanges,
+    (fc) =>
+      Effect.sync(() => {
+        if (fc.isNewFile) {
+          ts.sys.writeFile(fc.fileName, fc.textChanges.map((tc) => tc.newText).join(""))
+          return
+        }
+        const sf = service.getProgram()?.getSourceFile(fc.fileName)
+        if (!sf) return
+        let content = sf.getFullText()
+        const sorted = [...fc.textChanges].sort((a, b) => b.span.start - a.span.start)
+        sorted.forEach((tc) => {
+          content =
+            content.slice(0, tc.span.start) +
+            tc.newText +
+            content.slice(tc.span.start + tc.span.length)
+        })
+        ts.sys.writeFile(fc.fileName, content)
+      }),
+    { concurrency: 1 },
+  )
 
 const positionOf = (ctx: { position: { lineCol: { line: number; col: number }; offset: number } }) => ({
   line: ctx.position.lineCol.line,
@@ -1002,6 +1140,138 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
                 : { line: 0, col: 0 }
               return { file: ref.fileName, line: lc.line, col: lc.col }
             }),
+            warning: ctx.warning,
+          }
+        }),
+
+      organize_imports: ({ file, apply }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const fileChanges = ctx.service.organizeImports(
+            { type: "file", fileName: file },
+            {},
+            {},
+          )
+
+          const changes = fileChanges.map((fc) => ({
+            file: fc.fileName,
+            edits: fc.textChanges.map((tc) => ({
+              offset: tc.span.start,
+              length: tc.span.length,
+              newText: tc.newText,
+            })),
+          }))
+
+          if (apply && changes.length > 0) {
+            yield* applyFileChanges(ctx.service, fileChanges)
+          }
+
+          return {
+            changes,
+            applied: (apply && changes.length > 0) ?? false,
+            warning: ctx.warning,
+          }
+        }),
+
+      fix_all: ({ file, fixId, apply }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const combined = ctx.service.getCombinedCodeFix(
+            { type: "file", fileName: file },
+            fixId,
+            {},
+            {},
+          )
+
+          const changes = combined.changes.map((fc) => ({
+            file: fc.fileName,
+            isNewFile: fc.isNewFile ?? false,
+            edits: fc.textChanges.map((tc) => ({
+              offset: tc.span.start,
+              length: tc.span.length,
+              newText: tc.newText,
+            })),
+          }))
+
+          if (apply && changes.length > 0) {
+            yield* applyFileChanges(ctx.service, combined.changes)
+          }
+
+          return {
+            changes,
+            applied: (apply && changes.length > 0) ?? false,
+            warning: ctx.warning,
+          }
+        }),
+
+      refactor: ({ file, line, col, offset, startLine, startCol, endLine, endCol, refactorName, actionName, apply }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveFileOnly(lsm, file)
+          const sourceFile = ctx.service.getProgram()?.getSourceFile(file)
+
+          if (!sourceFile) {
+            return yield* new FileNotInProgramError({ file })
+          }
+
+          // Determine position or range
+          const hasRange = startLine !== undefined && startCol !== undefined
+            && endLine !== undefined && endCol !== undefined
+          const positionOrRange = hasRange
+            ? {
+              pos: ts.getPositionOfLineAndCharacter(sourceFile, startLine - 1, startCol - 1),
+              end: ts.getPositionOfLineAndCharacter(sourceFile, endLine - 1, endCol - 1),
+            }
+            : offset !== undefined
+              ? offset
+              : line !== undefined && col !== undefined
+                ? ts.getPositionOfLineAndCharacter(sourceFile, line - 1, col - 1)
+                : 0
+
+          // If no action specified, list available refactors
+          if (!refactorName || !actionName) {
+            const refactors = ctx.service.getApplicableRefactors(file, positionOrRange, {})
+            return {
+              refactors: refactors.map((r) => ({
+                name: r.name,
+                description: r.description,
+                actions: r.actions
+                  .filter((a) => !a.notApplicableReason)
+                  .map((a) => ({ name: a.name, description: a.description })),
+              })),
+              applied: false,
+              warning: ctx.warning,
+            }
+          }
+
+          // Apply specific refactor
+          const editInfo = ctx.service.getEditsForRefactor(
+            file, {}, positionOrRange, refactorName, actionName, {},
+          )
+
+          if (!editInfo) {
+            return {
+              changes: [],
+              applied: false,
+              warning: `Refactor '${refactorName}/${actionName}' returned no edits`,
+            }
+          }
+
+          const changes = editInfo.edits.map((fc) => ({
+            file: fc.fileName,
+            edits: fc.textChanges.map((tc) => ({
+              offset: tc.span.start,
+              length: tc.span.length,
+              newText: tc.newText,
+            })),
+          }))
+
+          if (apply && changes.length > 0) {
+            yield* applyFileChanges(ctx.service, editInfo.edits)
+          }
+
+          return {
+            changes,
+            applied: (apply && changes.length > 0) ?? false,
             warning: ctx.warning,
           }
         }),
