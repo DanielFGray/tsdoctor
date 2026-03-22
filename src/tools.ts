@@ -15,6 +15,7 @@ import {
   ProgramCreateError,
 } from "./errors.ts"
 import { typeToString, typeToTree } from "./typeFormat.ts"
+import { diffTypes, extractMismatchTypes } from "./typeDiff.ts"
 import { offsetToLineCol } from "./position.ts"
 
 // -----------------------------------------------------------------------------
@@ -406,6 +407,29 @@ const GetFileReferences = Tool.make("get_file_references", {
   ...toolDefaults,
 }).annotate(Tool.Readonly, true)
 
+const ExplainError = Tool.make("explain_error", {
+  description:
+    "Explain a type mismatch error by diffing the expected and actual types property by property. " +
+    "Finds ALL mismatched properties (TS only reports the first one). " +
+    "Shows the exact point of divergence in nested types. " +
+    "Pass the position of a TS2322 or TS2345 error from get_diagnostics.",
+  parameters: Schema.Struct({
+    ...PositionParams,
+    depth: Schema.Finite.pipe(
+      Schema.optionalKey,
+      Schema.withDecodingDefaultKey(() => 5),
+    ),
+  }),
+  success: Schema.Struct({
+    expected: Schema.String,
+    actual: Schema.String,
+    diff: Schema.Unknown,
+    position: PositionResult,
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
 const GetCallHierarchy = Tool.make("get_call_hierarchy", {
   description:
     "Find incoming callers or outgoing callees of a function/method. " +
@@ -575,6 +599,7 @@ export const IntrospectionToolkit = Toolkit.make(
   GetModuleExports,
   GetFileOutline,
   GetFileReferences,
+  ExplainError,
   GetCallHierarchy,
   Invalidate,
   OrganizeImports,
@@ -1194,6 +1219,58 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
                 : { line: 0, col: 0 }
               return { file: ref.fileName, line: lc.line, col: lc.col }
             }),
+            warning: ctx.warning,
+          }
+        }),
+
+      explain_error: ({ file, line, col, offset, depth }) =>
+        Effect.gen(function* () {
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const program = ctx.service.getProgram()
+
+          if (!program) {
+            return yield* new ProgramCreateError({ file })
+          }
+
+          const sourceFile = program.getSourceFile(file)
+          if (!sourceFile) {
+            return yield* new FileNotInProgramError({ file })
+          }
+
+          // Find the diagnostic at this position
+          const diagnostics = ctx.service.getSemanticDiagnostics(file)
+          const diag = diagnostics.find((d) =>
+            d.start !== undefined && d.start <= ctx.offset && (d.start + (d.length ?? 0)) >= ctx.offset,
+          )
+
+          if (!diag) {
+            return {
+              expected: "",
+              actual: "",
+              diff: { status: "match", type: "no diagnostic at this position" } as unknown,
+              position: positionOf(ctx),
+              warning: "No type error diagnostic found at this position",
+            }
+          }
+
+          const checker = program.getTypeChecker()
+          const types = extractMismatchTypes(checker, sourceFile, diag)
+
+          if (!types) {
+            return {
+              expected: "",
+              actual: "",
+              diff: { status: "mismatch", message: ts.flattenDiagnosticMessageText(diag.messageText, "\n") } as unknown,
+              position: positionOf(ctx),
+              warning: "Could not extract types from this diagnostic (code: " + diag.code + ")",
+            }
+          }
+
+          return {
+            expected: checker.typeToString(types.expected, undefined, ts.TypeFormatFlags.NoTruncation),
+            actual: checker.typeToString(types.actual, undefined, ts.TypeFormatFlags.NoTruncation),
+            diff: diffTypes(checker, types.expected, types.actual, depth) as unknown,
+            position: positionOf(ctx),
             warning: ctx.warning,
           }
         }),

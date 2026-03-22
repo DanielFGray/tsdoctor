@@ -11,6 +11,7 @@ const fixtureFile = path.resolve(import.meta.dirname, "fixtures/sample.ts")
 const errorFile = path.resolve(import.meta.dirname, "fixtures/with-errors.ts")
 const importerFile = path.resolve(import.meta.dirname, "fixtures/importer.ts")
 const needsImportFile = path.resolve(import.meta.dirname, "fixtures/needs-import.ts")
+const mismatchFile = path.resolve(import.meta.dirname, "fixtures/type-mismatch.ts")
 
 const appLayer = McpServer.toolkit(IntrospectionToolkit).pipe(
   Layer.provide(IntrospectionHandlers),
@@ -927,6 +928,47 @@ describe("MCP integration (raw JSON-RPC)", () => {
       const calls = content["calls"] as Array<{ name: string }>
       // getUser should have outgoing calls (to alice at minimum)
       expect(calls).toBeDefined()
+    }).pipe(Effect.scoped),
+  )
+
+  // --- explain_error ---
+
+  it.live("explain_error shows all mismatched properties in a type error", () =>
+    Effect.gen(function* () {
+      const { callTool } = yield* makeRawClient
+      // type-mismatch.ts has `const x: Expected = {} as Actual` on line 19
+      // The error is on `x` — let's find the exact position
+      const diagResult = yield* callTool("get_diagnostics", {
+        file: mismatchFile,
+        detailed: true,
+      })
+      const diagnostics = diagResult.structuredContent!["diagnostics"] as Array<{
+        position?: { line: number; col: number }
+      }>
+      expect(diagnostics.length).toBeGreaterThan(0)
+      const diag = diagnostics[0]!
+      expect(diag.position).toBeDefined()
+
+      const result = yield* callTool("explain_error", {
+        file: mismatchFile,
+        line: diag.position!.line,
+        col: diag.position!.col,
+      })
+
+      expect(result.isError).not.toBe(true)
+      const content = result.structuredContent!
+      expect(content["expected"]).toContain("Expected")
+      expect(content["actual"]).toContain("Actual")
+
+      const diff = content["diff"] as {
+        status: string
+        properties?: Array<{ name: string; diff: { status: string } }>
+      }
+      expect(diff.status).toBe("object")
+      // Should find BOTH age and address mismatches
+      const names = diff.properties!.map((p) => p.name)
+      expect(names).toContain("age")
+      expect(names).toContain("address")
     }).pipe(Effect.scoped),
   )
 })
