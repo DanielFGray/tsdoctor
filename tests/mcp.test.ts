@@ -167,7 +167,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
   it.live("get_diagnostics returns errors for bad file", () =>
     Effect.gen(function* () {
       const { callTool } = yield* makeRawClient
-      const result = yield* callTool("get_diagnostics", { file: errorFile })
+      const result = yield* callTool("get_diagnostics", { file: errorFile, detailed: true })
 
       expect(result.isError).not.toBe(true)
       const content = result.structuredContent!
@@ -365,7 +365,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
   it.live("get_diagnostics without range still returns all", () =>
     Effect.gen(function* () {
       const { callTool } = yield* makeRawClient
-      const result = yield* callTool("get_diagnostics", { file: errorFile })
+      const result = yield* callTool("get_diagnostics", { file: errorFile, detailed: true })
 
       const content = result.structuredContent!
       expect((content["count"] as number)).toBeGreaterThanOrEqual(2)
@@ -433,7 +433,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
   it.live("get_diagnostics includes code snippets", () =>
     Effect.gen(function* () {
       const { callTool } = yield* makeRawClient
-      const result = yield* callTool("get_diagnostics", { file: errorFile })
+      const result = yield* callTool("get_diagnostics", { file: errorFile, detailed: true })
 
       expect(result.isError).not.toBe(true)
       const diagnostics = result.structuredContent!["diagnostics"] as Array<{
@@ -514,7 +514,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
       // Should find the 2 errors from with-errors.ts even though we pass sample.ts
       const result = yield* callTool("get_diagnostics", {
         file: fixtureFile,
-        projectWide: true,
+        projectWide: true, detailed: true,
       })
 
       expect(result.isError).not.toBe(true)
@@ -604,7 +604,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
       const { callTool } = yield* makeRawClient
       // needs-import.ts has `alice` used without import (line 7)
       // First get the diagnostic to find the error code
-      const diagResult = yield* callTool("get_diagnostics", { file: needsImportFile })
+      const diagResult = yield* callTool("get_diagnostics", { file: needsImportFile, detailed: true })
       const diagnostics = diagResult.structuredContent!["diagnostics"] as Array<{
         code: number
         position?: { line: number; col: number; offset: number }
@@ -662,7 +662,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
   it.live("get_diagnostics includes tsc-style summary string", () =>
     Effect.gen(function* () {
       const { callTool } = yield* makeRawClient
-      const result = yield* callTool("get_diagnostics", { file: errorFile })
+      const result = yield* callTool("get_diagnostics", { file: errorFile, detailed: true })
 
       const content = result.structuredContent!
       const summary = content["summary"] as string
@@ -808,7 +808,7 @@ describe("MCP integration (raw JSON-RPC)", () => {
     Effect.gen(function* () {
       const { callTool } = yield* makeRawClient
       // First get a fixId from get_code_fixes
-      const diagResult = yield* callTool("get_diagnostics", { file: needsImportFile })
+      const diagResult = yield* callTool("get_diagnostics", { file: needsImportFile, detailed: true })
       const diagnostics = diagResult.structuredContent!["diagnostics"] as Array<{
         code: number
         position?: { line: number; col: number }

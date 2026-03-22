@@ -140,10 +140,13 @@ const GetCompletions = Tool.make("get_completions", {
 const GetDiagnostics = Tool.make("get_diagnostics", {
   description:
     "Get type errors with full (non-truncated) diagnostic messages and code snippets. " +
-    "By default checks a single file. Set projectWide: true to check all files in the project. " +
+    "By default returns only the tsc-style summary (compact). " +
+    "Set detailed: true to include full structured diagnostics with snippets and positions. " +
+    "Set projectWide: true to check all files in the project. " +
     "Use startLine/endLine to scope to recently edited lines.",
   parameters: Schema.Struct({
     file: Schema.String,
+    detailed: Schema.optionalKey(Schema.Boolean),
     projectWide: Schema.optionalKey(Schema.Boolean),
     suggestions: Schema.optionalKey(Schema.Boolean),
     startLine: Schema.optionalKey(Schema.Finite),
@@ -746,7 +749,7 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_diagnostics: ({ file, projectWide, suggestions, startLine, endLine }) =>
+      get_diagnostics: ({ file, detailed, projectWide, suggestions, startLine, endLine }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveFileOnly(lsm, file)
           const program = ctx.service.getProgram()
@@ -774,7 +777,7 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           const summary = filtered.map(formatDiagnosticLine).join("\n")
 
           return {
-            diagnostics: filtered.map(formatDiagnostic),
+            diagnostics: detailed ? filtered.map(formatDiagnostic) : [],
             count: filtered.length,
             summary: filtered.length > 0
               ? summary + `\n\nFound ${filtered.length} error(s).`
