@@ -1,7 +1,7 @@
 {
   "name": "tsdoctor",
   "type": "module",
-  "private": true,
+  "version": "0.1.0",
   "bin": {
     "tsdoctor": "src/cli/main.ts"
   },
@@ -23,6 +23,5 @@
     "@effect/vitest": "^4.0.0-beta.36",
     "@types/bun": "latest",
     "vitest": "^4.1.0"
-  },
-  "version": "1.0.0"
+  }
 }
