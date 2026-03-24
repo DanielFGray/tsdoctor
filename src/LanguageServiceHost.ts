@@ -106,6 +106,26 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
     return changed
   }
 
+  /** Proactively update a single file's version (called by the file watcher). */
+  notifyFileChanged(fileName: string): void {
+    const newVersion = this.computeVersion(fileName)
+    const oldVersion = this.versions.get(fileName)
+    if (oldVersion !== undefined && oldVersion !== newVersion) {
+      this.versions.set(fileName, newVersion)
+      this.projectVersion++
+    }
+  }
+
+  /** Remove a deleted file from the project. */
+  notifyFileDeleted(fileName: string): void {
+    const idx = this.fileNames.indexOf(fileName)
+    if (idx >= 0) {
+      this.fileNames.splice(idx, 1)
+      this.versions.delete(fileName)
+      this.projectVersion++
+    }
+  }
+
   /** Add a file that isn't in the tsconfig's file list (e.g. loose file) */
   ensureFile(fileName: string): void {
     if (!this.fileNames.includes(fileName)) {
