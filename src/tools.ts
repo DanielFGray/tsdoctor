@@ -185,15 +185,26 @@ const GetDiagnostics = Tool.make("get_diagnostics", {
 
 const Typecheck = Tool.make("typecheck", {
   description:
-    "Quick project-wide type check. Returns pass/fail, error count, and tsc-style summary. " +
-    "The fastest way to answer 'does this project typecheck?'. " +
-    "Pass any file in the project to identify which tsconfig to use.",
+    "Quick project-wide type check. Returns pass/fail, error count, per-file breakdown, " +
+    "and per-error-code breakdown. The fastest way to answer 'does this project typecheck?'. " +
+    "Pass any file in the project to identify which tsconfig to use. " +
+    "Use limit to cap the number of diagnostic lines in the summary (default: all).",
   parameters: Schema.Struct({
     file: Schema.String,
+    limit: Schema.optionalKey(Schema.Finite),
   }),
   success: Schema.Struct({
     pass: Schema.Boolean,
     errorCount: Schema.Finite,
+    fileErrors: Schema.Array(Schema.Struct({
+      file: Schema.String,
+      count: Schema.Finite,
+    })),
+    errorCodes: Schema.Array(Schema.Struct({
+      code: Schema.Finite,
+      message: Schema.String,
+      count: Schema.Finite,
+    })),
     summary: Schema.String,
     warning: Schema.NullOr(Schema.String),
   }),
@@ -902,7 +913,7 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      typecheck: ({ file }) =>
+      typecheck: ({ file, limit }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveFileOnly(lsm, file)
           const program = ctx.service.getProgram()
@@ -911,19 +922,50 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
             : ctx.service.getSemanticDiagnostics(file)
 
           const errors = diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error)
-          const maxLines = 30
+
+          // Per-file breakdown
+          const fileCounts = new Map<string, number>()
+          errors.forEach((d) => {
+            const name = d.file?.fileName.replace(process.cwd() + "/", "") ?? "<unknown>"
+            fileCounts.set(name, (fileCounts.get(name) ?? 0) + 1)
+          })
+          const fileErrors = [...fileCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([file, count]) => ({ file, count }))
+
+          // Per-error-code breakdown
+          const codeCounts = new Map<number, { message: string; count: number }>()
+          errors.forEach((d) => {
+            const existing = codeCounts.get(d.code)
+            if (existing) {
+              existing.count++
+            } else {
+              codeCounts.set(d.code, {
+                message: flattenDiagnosticMessageText(d.messageText).slice(0, 120),
+                count: 1,
+              })
+            }
+          })
+          const errorCodes = [...codeCounts.entries()]
+            .sort((a, b) => b[1].count - a[1].count)
+            .map(([code, { message, count }]) => ({ code, message, count }))
+
+          // Summary lines with optional limit
           const lines = errors.map(formatDiagnosticLine)
+          const maxLines = limit ?? lines.length
+          const shown = lines.slice(0, maxLines)
           const truncated = lines.length > maxLines
-          const shown = truncated ? lines.slice(0, maxLines) : lines
           const summary = errors.length > 0
             ? shown.join("\n")
               + (truncated ? `\n... and ${lines.length - maxLines} more` : "")
-              + `\n\nFound ${errors.length} error(s).`
+              + `\n\nFound ${errors.length} error(s) in ${fileErrors.length} file(s).`
             : "No errors found."
 
           return {
             pass: errors.length === 0,
             errorCount: errors.length,
+            fileErrors,
+            errorCodes,
             summary,
             warning: ctx.warning,
           }
