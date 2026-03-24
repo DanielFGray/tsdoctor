@@ -209,6 +209,7 @@ export class LanguageServiceManager extends ServiceMap.Service<
           if (Option.isSome(existing)) {
             const managed = existing.value
             managed.host.ensureFile(absPath)
+            managed.host.notifyFileChanged(absPath)
             managed.lastAccessedAt = Date.now()
             return { service: managed.service, warning }
           }
