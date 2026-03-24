@@ -13,6 +13,7 @@ import {
   NodeNotFoundError,
   PositionOutOfRangeError,
   ProgramCreateError,
+  SymbolNotFoundError,
 } from "./errors.ts"
 import { typeToString, typeToTree } from "./typeFormat.ts"
 import { diffTypes, extractMismatchTypes } from "./typeDiff.ts"
@@ -27,6 +28,7 @@ const PositionParams = {
   line: Schema.optionalKey(Schema.Finite),
   col: Schema.optionalKey(Schema.Finite),
   offset: Schema.optionalKey(Schema.Finite),
+  symbol: Schema.optionalKey(Schema.String),
 }
 
 const PositionResult = Schema.Struct({
@@ -40,6 +42,7 @@ const IntrospectionFailure = Schema.Union([
   FileNotInProgramError,
   NodeNotFoundError,
   PositionOutOfRangeError,
+  SymbolNotFoundError,
 ])
 
 const toolDefaults = {
@@ -73,7 +76,8 @@ const GetTypeAtPosition = Tool.make("get_type_at_position", {
     "Use this to understand what type a variable, parameter, or expression resolves to. " +
     "For human-readable hover info with docs, use get_quickinfo instead. " +
     "depth controls type alias expansion (default 1 = overview, increase for nested detail). " +
-    "Use startLine/startCol + endLine/endCol to get the type of a range (e.g. a whole pipe chain).",
+    "Use startLine/startCol + endLine/endCol to get the type of a range (e.g. a whole pipe chain). " +
+    "Pass symbol instead of line/col to resolve by name (e.g. symbol='getUser' or symbol='MyClass.method').",
   parameters: Schema.Struct({
     ...PositionParams,
     depth: makeDepthParam(1),
@@ -541,6 +545,7 @@ const Refactor = Tool.make("refactor", {
     line: Schema.optionalKey(Schema.Finite),
     col: Schema.optionalKey(Schema.Finite),
     offset: Schema.optionalKey(Schema.Finite),
+    symbol: Schema.optionalKey(Schema.String),
     startLine: Schema.optionalKey(Schema.Finite),
     startCol: Schema.optionalKey(Schema.Finite),
     endLine: Schema.optionalKey(Schema.Finite),
@@ -740,9 +745,10 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
   Effect.gen(function* () {
     const lsm = yield* LanguageServiceManager
 
-    const typeAtPosition = ({ file, line, col, offset, depth, startLine, startCol, endLine, endCol }: {
+    const typeAtPosition = ({ file, line, col, offset, symbol, depth, startLine, startCol, endLine, endCol }: {
       readonly file: string
       readonly line?: number; readonly col?: number; readonly offset?: number
+      readonly symbol?: string
       readonly depth?: number
       readonly startLine?: number; readonly startCol?: number
       readonly endLine?: number; readonly endCol?: number
@@ -752,7 +758,7 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           && endLine !== undefined && endCol !== undefined
         const ctx = hasRange
           ? yield* resolveFileContextForRange(lsm, file, { startLine, startCol, endLine, endCol })
-          : yield* resolveFileContext(lsm, file, { line, col, offset })
+          : yield* resolveFileContext(lsm, file, { line, col, offset, symbol })
         const type = ctx.checker.getTypeAtLocation(ctx.node)
 
         return {
@@ -766,9 +772,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
     return {
       get_type_at_position: typeAtPosition,
 
-      get_quickinfo: ({ file, line, col, offset }) =>
+      get_quickinfo: ({ file, line, col, offset, symbol }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const info = ctx.service.getQuickInfoAtPosition(file, ctx.offset)
 
           return {
@@ -784,9 +790,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_completions: ({ file, line, col, offset, prefix, limit }) =>
+      get_completions: ({ file, line, col, offset, symbol, prefix, limit }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const completions = ctx.service.getCompletionsAtPosition(file, ctx.offset, undefined)
 
           const allEntries = (completions?.entries ?? [])
@@ -873,9 +879,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
 
       expand_type: typeAtPosition,
 
-      get_signature_help: ({ file, line, col, offset }) =>
+      get_signature_help: ({ file, line, col, offset, symbol }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const help = ctx.service.getSignatureHelpItems(file, ctx.offset, undefined)
 
           return {
@@ -902,9 +908,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_definition: ({ file, line, col, offset }) =>
+      get_definition: ({ file, line, col, offset, symbol }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const defs = ctx.service.getDefinitionAtPosition(file, ctx.offset)
 
           return {
@@ -926,9 +932,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_references: ({ file, line, col, offset }) =>
+      get_references: ({ file, line, col, offset, symbol }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const refs = ctx.service.findReferences(file, ctx.offset)
 
           return {
@@ -951,9 +957,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      rename_symbol: ({ file, line, col, offset, newName, apply }) =>
+      rename_symbol: ({ file, line, col, offset, symbol, newName, apply }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const renameInfo = ctx.service.getRenameInfo(file, ctx.offset, {})
 
           if (!renameInfo.canRename) {
@@ -1033,9 +1039,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_code_fixes: ({ file, line, col, offset, errorCodes, apply }) =>
+      get_code_fixes: ({ file, line, col, offset, symbol, errorCodes, apply }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const program = ctx.service.getProgram()
 
           // Use the offset as both start and end for point diagnostics
@@ -1223,9 +1229,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      explain_error: ({ file, line, col, offset, depth }) =>
+      explain_error: ({ file, line, col, offset, symbol, depth }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const program = ctx.service.getProgram()
 
           if (!program) {
@@ -1275,9 +1281,9 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      get_call_hierarchy: ({ file, line, col, offset, direction }) =>
+      get_call_hierarchy: ({ file, line, col, offset, symbol, direction }) =>
         Effect.gen(function* () {
-          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset })
+          const ctx = yield* resolveServiceContext(lsm, file, { line, col, offset, symbol })
           const prepared = ctx.service.prepareCallHierarchy(file, ctx.offset)
 
           if (!prepared) {
@@ -1393,7 +1399,7 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
         }),
 
-      refactor: ({ file, line, col, offset, startLine, startCol, endLine, endCol, refactorName, actionName, apply }) =>
+      refactor: ({ file, line, col, offset, symbol, startLine, startCol, endLine, endCol, refactorName, actionName, apply }) =>
         Effect.gen(function* () {
           const ctx = yield* resolveFileOnly(lsm, file)
           const sourceFile = ctx.service.getProgram()?.getSourceFile(file)

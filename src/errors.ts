@@ -28,8 +28,16 @@ export class PositionOutOfRangeError extends Schema.TaggedErrorClass(
   col: Schema.Number,
 }) {}
 
+export class SymbolNotFoundError extends Schema.TaggedErrorClass(
+  "SymbolNotFoundError",
+)("SymbolNotFoundError", {
+  file: Schema.String,
+  symbol: Schema.String,
+}) {}
+
 export type IntrospectionError =
   | ProgramCreateError
   | FileNotInProgramError
   | NodeNotFoundError
   | PositionOutOfRangeError
+  | SymbolNotFoundError

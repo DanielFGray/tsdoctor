@@ -28,3 +28,15 @@ export const users = [alice].map(
 )
 
 export const result = getUser(1)
+
+export class Calculator {
+  readonly value: number = 0
+
+  add(n: number): number {
+    return this.value + n
+  }
+
+  multiply(n: number): number {
+    return this.value * n
+  }
+}
