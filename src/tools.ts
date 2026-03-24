@@ -585,6 +585,33 @@ const Refactor = Tool.make("refactor", {
   ...toolDefaults,
 })
 
+const ExploreModule = Tool.make("explore_module", {
+  description:
+    "Discover what APIs a module provides. " +
+    "Pass a module specifier (e.g. 'effect', 'effect/unstable/cli') and optionally a member path " +
+    "(e.g. 'Effect', 'Schema.Struct') to drill into. " +
+    "Without a member: lists the module's top-level exports. " +
+    "With a member that's a namespace/object: lists its properties (completions). " +
+    "With a member that's a value/type: shows its type signature. " +
+    "Use this to answer 'what APIs are available?' without reading source files. " +
+    "Requires a context file in the project for module resolution (any .ts file).",
+  parameters: Schema.Struct({
+    file: Schema.String,
+    module: Schema.String,
+    member: Schema.optionalKey(Schema.String),
+  }),
+  success: Schema.Struct({
+    members: Schema.Array(Schema.Struct({
+      name: Schema.String,
+      kind: Schema.String,
+      type: Schema.optionalKey(Schema.String),
+    })),
+    signature: Schema.optionalKey(Schema.String),
+    warning: Schema.NullOr(Schema.String),
+  }),
+  ...toolDefaults,
+}).annotate(Tool.Readonly, true)
+
 // -----------------------------------------------------------------------------
 // Toolkit
 // -----------------------------------------------------------------------------
@@ -610,6 +637,7 @@ export const IntrospectionToolkit = Toolkit.make(
   OrganizeImports,
   FixAll,
   Refactor,
+  ExploreModule,
 )
 
 // -----------------------------------------------------------------------------
@@ -671,6 +699,30 @@ const applyFileChanges = (
       }),
     { concurrency: 1 },
   )
+
+/** Serialize a symbol's type, expanding interfaces and type aliases instead of returning 'any'. */
+const symbolTypeString = (checker: ts.TypeChecker, sym: ts.Symbol): string => {
+  const typeFlags = ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.InTypeAlias
+  const isTypeOnly = !!(sym.flags & (ts.SymbolFlags.Interface | ts.SymbolFlags.TypeAlias))
+
+  if (isTypeOnly) {
+    const declType = checker.getDeclaredTypeOfSymbol(sym)
+    if (sym.flags & ts.SymbolFlags.Interface) {
+      const props = checker.getPropertiesOfType(declType)
+      const members = props.map((p) => {
+        const pType = checker.getTypeOfSymbol(p)
+        const optional = p.declarations?.some((d) =>
+          ts.isPropertySignature(d) && !!d.questionToken,
+        )
+        return `${p.name}${optional ? "?" : ""}: ${checker.typeToString(pType, undefined, typeFlags)}`
+      })
+      return `{ ${members.join("; ")} }`
+    }
+    return checker.typeToString(declType, undefined, typeFlags)
+  }
+
+  return checker.typeToString(checker.getTypeOfSymbol(sym), undefined, typeFlags)
+}
 
 const positionOf = (ctx: { position: { lineCol: { line: number; col: number }; offset: number } }) => ({
   line: ctx.position.lineCol.line,
@@ -1150,15 +1202,11 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
           }
 
           const exportSymbols = checker.getExportsOfModule(moduleSymbol)
-          const exports = exportSymbols.map((sym) => {
-            const type = checker.getTypeOfSymbol(sym)
-            const kind = ts.SymbolFlags[sym.flags & ~ts.SymbolFlags.Transient] ?? "unknown"
-            return {
-              name: sym.getName(),
-              kind,
-              type: checker.typeToString(type, undefined, ts.TypeFormatFlags.NoTruncation),
-            }
-          })
+          const exports = exportSymbols.map((sym) => ({
+            name: sym.getName(),
+            kind: ts.SymbolFlags[sym.flags & ~ts.SymbolFlags.Transient] ?? "unknown",
+            type: symbolTypeString(checker, sym),
+          }))
 
           return {
             exports,
@@ -1468,6 +1516,106 @@ export const IntrospectionHandlers = IntrospectionToolkit.toLayer(
             changes,
             applied: (apply && changes.length > 0) ?? false,
             warning: ctx.warning,
+          }
+        }),
+
+      explore_module: ({ file, module: moduleSpecifier, member }) =>
+        Effect.gen(function* () {
+          const absFile = ts.sys.resolvePath(file)
+
+          // No member — use virtual file with import to get module exports via checker
+          if (!member) {
+            const dir = absFile.replace(/[/\\][^/\\]+$/, "")
+            const virtualPath = `${dir}/__tsdoctor_explore__.ts`
+            const importContent = `import * as __gc_mod__ from "${moduleSpecifier}"\n`
+
+            const exports = yield* lsm.withVirtualFile(
+              absFile, virtualPath, importContent,
+              (service) => {
+                const program = service.getProgram()
+                if (!program) return []
+                const checker = program.getTypeChecker()
+                const sf = program.getSourceFile(virtualPath)
+                if (!sf) return []
+
+                // Find the import declaration's module symbol
+                const importDecl = sf.statements[0]
+                if (!importDecl || !ts.isImportDeclaration(importDecl)) return []
+                const moduleSymbol = checker.getSymbolAtLocation(importDecl.moduleSpecifier)
+                if (!moduleSymbol) return []
+
+                return checker.getExportsOfModule(moduleSymbol).map((sym) => ({
+                  name: sym.getName(),
+                  kind: ts.SymbolFlags[sym.flags & ~ts.SymbolFlags.Transient] ?? "unknown",
+                  type: symbolTypeString(checker, sym),
+                }))
+              },
+            )
+
+            return { members: exports, warning: null }
+          }
+
+          // With member — use virtual file to get completions/type
+          const dir = absFile.replace(/[/\\][^/\\]+$/, "")
+          const virtualPath = `${dir}/__tsdoctor_explore__.ts`
+          const parts = member.split(".")
+          const importBinding = parts[0]!
+          const rest = parts.slice(1).join(".")
+
+          // Build: import { X } from "module"\nX.rest.
+          // Position cursor after the trailing dot to get completions
+          const expr = rest ? `${importBinding}.${rest}` : importBinding
+          const content = `import { ${importBinding} } from "${moduleSpecifier}"\n${expr}.`
+          const cursorOffset = content.length
+
+          const completions = yield* lsm.withVirtualFile(
+            absFile, virtualPath, content,
+            (service) => {
+              const result = service.getCompletionsAtPosition(
+                virtualPath, cursorOffset,
+                { includeCompletionsForModuleExports: false },
+              )
+              return (result?.entries ?? [])
+                .filter((e) => e.kind !== ts.ScriptElementKind.warning)
+                .map((e) => {
+                  const details = service.getCompletionEntryDetails(
+                    virtualPath, cursorOffset, e.name, undefined, undefined, undefined, undefined,
+                  )
+                  const raw = details?.displayParts?.map((p) => p.text).join("") ?? ""
+                  // Strip redundant "const name: " / "function name" / "(method) name" prefix
+                  const type = raw.replace(/^(?:const|let|var|function|class|\((?:method|property|alias)\))\s+\S+(?::\s*)?/, "")
+                  return { name: e.name, kind: e.kind, type }
+                })
+            },
+          )
+
+          // Also get the type signature of the expression itself
+          // Position cursor on the last part of the member path for accurate quickinfo
+          const sigContent = `import { ${importBinding} } from "${moduleSpecifier}"\n${expr}`
+          const sigOffset = sigContent.length - 1 // cursor on the last char of expr
+
+          const typeInfo = yield* lsm.withVirtualFile(
+            absFile, virtualPath, sigContent,
+            (service) => {
+              const qi = service.getQuickInfoAtPosition(virtualPath, sigOffset)
+              return {
+                signature: qi?.displayParts?.map((p) => p.text).join("") ?? "",
+                documentation: qi?.documentation?.map((p) => p.text).join("") ?? "",
+              }
+            },
+          )
+
+          const sig = typeInfo.signature +
+            (typeInfo.documentation ? `\n\n${typeInfo.documentation}` : "")
+
+          return {
+            members: completions.map((m) => ({
+              name: m.name,
+              kind: m.kind,
+              ...(m.type ? { type: m.type } : {}),
+            })),
+            ...(sig ? { signature: sig } : {}),
+            warning: null,
           }
         }),
     }

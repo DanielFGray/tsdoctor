@@ -11,6 +11,7 @@ import { type ResolvedTsConfig, defaultCompilerOptions } from "./TsConfigResolve
  */
 export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
   private readonly versions = new Map<string, string>()
+  private readonly virtualFiles = new Map<string, { content: string; version: number }>()
   private projectVersion = 0
 
   constructor(
@@ -31,6 +32,9 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
   }
 
   getScriptVersion(fileName: string): string {
+    const virtual = this.virtualFiles.get(fileName)
+    if (virtual !== undefined) return String(virtual.version)
+
     const cached = this.versions.get(fileName)
     if (cached !== undefined) return cached
 
@@ -40,6 +44,8 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
   }
 
   getScriptSnapshot(fileName: string): ts.IScriptSnapshot | undefined {
+    const virtual = this.virtualFiles.get(fileName)
+    if (virtual !== undefined) return ts.ScriptSnapshot.fromString(virtual.content)
     const content = ts.sys.readFile(fileName)
     return content !== undefined
       ? ts.ScriptSnapshot.fromString(content)
@@ -57,11 +63,13 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
   }
 
   readFile(path: string, encoding?: string): string | undefined {
+    const virtual = this.virtualFiles.get(path)
+    if (virtual !== undefined) return virtual.content
     return ts.sys.readFile(path, encoding)
   }
 
   fileExists(path: string): boolean {
-    return ts.sys.fileExists(path)
+    return this.virtualFiles.has(path) || ts.sys.fileExists(path)
   }
 
   readDirectory(
@@ -132,6 +140,24 @@ export class LanguageServiceHostImpl implements ts.LanguageServiceHost {
       this.fileNames.push(fileName)
       this.projectVersion++
     }
+  }
+
+  /** Inject a virtual file into the LanguageService without writing to disk. */
+  setVirtualFile(fileName: string, content: string): void {
+    const existing = this.virtualFiles.get(fileName)
+    const version = existing !== undefined ? existing.version + 1 : 1
+    this.virtualFiles.set(fileName, { content, version })
+    this.ensureFile(fileName)
+    this.projectVersion++
+  }
+
+  /** Remove a virtual file. */
+  removeVirtualFile(fileName: string): void {
+    if (!this.virtualFiles.has(fileName)) return
+    this.virtualFiles.delete(fileName)
+    const idx = this.fileNames.indexOf(fileName)
+    if (idx >= 0) this.fileNames.splice(idx, 1)
+    this.projectVersion++
   }
 
   /**
