@@ -28,7 +28,7 @@ const appLayer = McpServer.toolkit(IntrospectionToolkit).pipe(
  */
 const makeRawClient = Effect.gen(function* () {
   const serverLayer = McpServer.layerHttp({
-    name: "glass-cobra-test",
+    name: "tsdoctor-test",
     version: "0.1.0",
     path: "/mcp",
   }).pipe(Layer.provide(appLayer))
@@ -694,15 +694,10 @@ describe("MCP integration (raw JSON-RPC)", () => {
   it.live("typecheck returns pass: true for clean project file", () =>
     Effect.gen(function* () {
       const { callTool } = yield* makeRawClient
-      // sample.ts is clean but the project has with-errors.ts
-      // So projectWide will find errors. Let's test with a clean standalone file.
-      // Actually, typecheck checks the whole project, so it'll find errors.
-      // Let's just verify the shape.
       const result = yield* callTool("typecheck", { file: fixtureFile })
 
       expect(result.isError).not.toBe(true)
       const content = result.structuredContent!
-      // The project has with-errors.ts so it won't pass
       expect(content).toHaveProperty("pass")
       expect(content).toHaveProperty("errorCount")
       expect(content).toHaveProperty("summary")

@@ -16,7 +16,7 @@ const McpLive = McpServer.toolkit(IntrospectionToolkit).pipe(
 
 const ServerLive = HttpRouter.serve(
   McpServer.layerHttp({
-    name: "glass-cobra",
+    name: "tsdoctor",
     version: "0.1.0",
     path: "/mcp",
   }).pipe(Layer.provide(McpLive)),
@@ -24,7 +24,7 @@ const ServerLive = HttpRouter.serve(
   Layer.provide(BunHttpServer.layer({ port: PORT })),
 )
 
-Effect.log(`Starting glass-cobra MCP server on port ${PORT}`).pipe(
+Effect.log(`Starting tsdoctor MCP server on port ${PORT}`).pipe(
   Effect.andThen(Layer.launch(ServerLive)),
   BunRuntime.runMain,
 )

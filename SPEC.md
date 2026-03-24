@@ -1,4 +1,4 @@
-# glass-cobra
+# tsdoctor
 
 > Working codename. TypeScript compiler introspection server — MCP tools + optional TUI for humans and AI agents.
 

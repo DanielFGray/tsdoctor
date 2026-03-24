@@ -1,4 +1,4 @@
-# glass-cobra
+# tsdoctor
 
 TypeScript compiler introspection server — MCP tools for humans and AI agents.
 
